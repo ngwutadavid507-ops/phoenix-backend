@@ -3,26 +3,25 @@ import re
 import math
 import requests
 from collections import defaultdict
-from fastapi import FastAPI, Request, UploadFile, File, Form
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 from groq import Groq
 from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="Phoenix AI Unified Backend", version="2.0.0")
+app = FastAPI(title="Phoenix AI Unified Backend", version="2.0.1")
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
 def web_search(query):
     try:
-        # Upgraded to use DuckDuckGo HTML scraping layer for real-time 2026 web results without API keys
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        # Fallback multi-agent structure to scrape text streams securely
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
         url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
-        r = requests.get(url, headers=headers, timeout=12)
+        r = requests.get(url, headers=headers, timeout=10)
         
-        # Pull text blocks using regex to keep backend dependencies lightweight
         snippets = re.findall(r'<a class="result__snippet"[^>]*>(.*?)</a>', r.text, re.DOTALL)
         clean_results = []
         for snip in snippets[:4]:
@@ -56,50 +55,39 @@ def ask_groq(system_prompt, user_prompt, model="llama-3.3-70b-versatile"):
     return response.choices[0].message.content
 
 # Custom TF-IDF Indexing Utilities
-def tokenize(text):
-    return re.findall(r'\b[a-z]{2,}\b', text.lower())
-
+def tokenize(text): return re.findall(r'\b[a-z]{2,}\b', text.lower())
 def chunk_text(text, chunk_size=120, overlap=20):
-    words = text.split()
-    chunks = []
-    i = 0
+    words = text.split(); chunks = []; i = 0
     while i < len(words):
-        chunk = " ".join(words[i:i + chunk_size])
-        chunks.append(chunk)
-        if i + chunk_size >= len(words):
-            break
+        chunks.append(" ".join(words[i:i + chunk_size]))
+        if i + chunk_size >= len(words): break
         i += chunk_size - overlap
     return chunks
 
 def build_index(chunks):
-    index = defaultdict(list)
-    doc_freq = defaultdict(int)
+    index = defaultdict(list); dfreq = defaultdict(int)
     for cid, chunk in enumerate(chunks):
-        tokens = tokenize(chunk)
-        if not tokens: continue
+        tks = tokenize(chunk)
+        if not tks: continue
         freq = defaultdict(int)
-        for token in tokens: freq[token] += 1
-        for token, count in freq.items():
-            tf = count / len(tokens)
-            index[token].append((cid, tf))
-            doc_freq[token] += 1
-    return index, doc_freq
+        for t in tks: freq[t] += 1
+        for t, count in freq.items():
+            index[t].append((cid, count / len(tks)))
+            dfreq[t] += 1
+    return index, dfreq
 
 def retrieve_chunks(query, chunks, index, doc_freq, top_k=4):
-    query_tokens = tokenize(query)
-    n = len(chunks)
-    scores = defaultdict(float)
-    for token in query_tokens:
-        if token not in index: continue
-        idf = math.log((n + 1) / (doc_freq[token] + 1)) + 1.0
-        for cid, tf in index[token]: scores[cid] += tf * idf
+    tks = tokenize(query); scores = defaultdict(float)
+    for t in tks:
+        if t not in index: continue
+        idf = math.log((len(chunks) + 1) / (doc_freq[t] + 1)) + 1.0
+        for cid, tf in index[t]: scores[cid] += tf * idf
     if not scores: return chunks[:top_k]
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     return [chunks[cid] for cid, _ in ranked[:top_k]]
 
 @app.get("/")
-def root():
-    return {"status": "Phoenix Core Engine Active", "year": 2026}
+def root(): return {"status": "Phoenix Core Engine Active", "year": 2026}
 
 @app.post("/chat")
 async def chat(request: Request):
@@ -121,9 +109,20 @@ async def chat(request: Request):
                     f"Live Search Data:\n{search_results}\n\nQuestion: {question}"
                 )
             else:
-                answer = ask_groq(f"You are Phoenix AI. Web search failed. Answer directly but ask user to double-check online. Respond in {lang}.", question)
+                # Upgraded Fallback Guardrail System Prompt
+                answer = ask_groq(
+                    f"You are Phoenix AI, built by Chidibless from Nigeria. The current year is 2026. "
+                    f"Donald Trump is the President of the United States (inaugurated Jan 20, 2025). "
+                    f"Answer the user directly using this 2026 timeline context. Note that live web search failed, "
+                    f"so briefly advise the user to confirm rapidly changing details live. Respond in {lang}.",
+                    question
+                )
         else:
-            answer = ask_groq(f"You are Phoenix AI, built by Chidibless from Nigeria. Answer helpfully. Respond in {lang}.", question)
+            answer = ask_groq(
+                f"You are Phoenix AI, built by Chidibless from Nigeria. The current year is 2026. "
+                f"Answer any question helpfully, clearly, and concisely. Respond in {lang}.",
+                question
+            )
 
         return JSONResponse({"answer": answer, "platform": platform, "language": lang})
     except Exception as e:
@@ -132,12 +131,9 @@ async def chat(request: Request):
 @app.post("/voice")
 async def process_voice(file: UploadFile = File(...)):
     try:
-        # Send raw audio bytes directly into Groq Whisper Engine
         file_bytes = await file.read()
         transcription = client.audio.transcriptions.create(
-            file=(file.filename, file_bytes),
-            model="whisper-large-v3",
-            response_format="json"
+            file=(file.filename, file_bytes), model="whisper-large-v3", response_format="json"
         )
         return JSONResponse({"transcript": transcription.text})
     except Exception as e:
@@ -151,20 +147,11 @@ async def process_vision(request: Request):
         prompt = body.get("prompt", "Analyze this image and describe it clearly.")
         lang = body.get("language", "English")
 
-        if not image_url:
-            return JSONResponse({"error": "No image URL provided"}, status_code=400)
+        if not image_url: return JSONResponse({"error": "No image URL provided"}, status_code=400)
 
         response = client.chat.completions.create(
             model="llama-3.2-11b-vision-preview",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"{prompt} Respond in {lang}."},
-                        {"type": "image_url", "image_url": {"url": image_url}}
-                    ]
-                }
-            ],
+            messages=[{"role": "user", "content": [{"type": "text", "text": f"{prompt} Respond in {lang}."}, {"type": "image_url", "image_url": {"url": image_url}}]}],
             max_tokens=1000
         )
         return JSONResponse({"answer": response.choices[0].message.content})
@@ -180,8 +167,7 @@ async def analyse_document(request: Request):
         question = body.get("question", "")
         lang = body.get("language", "English")
 
-        if not text:
-            return JSONResponse({"error": "No text provided"}, status_code=400)
+        if not text: return JSONResponse({"error": "No text provided"}, status_code=400)
 
         chunks = chunk_text(text)
         idx, dfreq = build_index(chunks)
@@ -200,8 +186,7 @@ async def analyse_document(request: Request):
             answer = ask_groq(f"You are Phoenix AI. Review this information. Respond in {lang}.", f"Content:\n{text[:8000]}")
 
         return JSONResponse({"answer": answer, "chunks": total_chunks, "action": action, "language": lang})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception as e: return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/compare")
 async def compare_documents(request: Request):
@@ -211,13 +196,11 @@ async def compare_documents(request: Request):
         doc2 = body.get("document2", "")
         lang = body.get("language", "English")
 
-        if not doc1 or not doc2:
-            return JSONResponse({"error": "Both documents required"}, status_code=400)
+        if not doc1 or not doc2: return JSONResponse({"error": "Both documents required"}, status_code=400)
 
         answer = ask_groq(f"You are Phoenix AI. Structurally compare both text sets. List similarities, sharp contrasts, and structural completeness. Respond in {lang}.", f"Doc1:\n{doc1[:6000]}\n\nDoc2:\n{doc2[:6000]}")
         return JSONResponse({"answer": answer, "language": lang})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception as e: return JSONResponse({"error": str(e)}, status_code=500)
 
 if __name__ == "__main__":
     import uvicorn
