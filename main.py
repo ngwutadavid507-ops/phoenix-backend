@@ -10,27 +10,55 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="Phoenix AI Unified Backend", version="2.0.1")
+app = FastAPI(title="Phoenix AI Unified Backend", version="2.0.2")
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
 def web_search(query):
+    # 1. Primary Option: Dedicated AI Search Engine (Tavily Free Tier)
+    TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
+    if TAVILY_API_KEY:
+        try:
+            url = "https://api.tavily.com/search"
+            payload = {
+                "api_key": TAVILY_API_KEY, 
+                "query": query, 
+                "search_depth": "basic",
+                "max_results": 3
+            }
+            response = requests.post(url, json=payload, timeout=8)
+            if response.status_code == 200:
+                results = response.json().get("results", [])
+                snippets = [res.get("content", "") for res in results if res.get("content")]
+                if snippets:
+                    return "\n\n".join(snippets)
+        except Exception:
+            pass 
+
+    # 2. Reliable Fallback: Official JSON Endpoint (Never blocks Cloud Server IPs)
     try:
-        # Fallback multi-agent structure to scrape text streams securely
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-        url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
-        r = requests.get(url, headers=headers, timeout=10)
+        url = f"https://api.duckduckgo.com/?q={requests.utils.quote(query)}&format=json&no_html=1"
+        headers = {"User-Agent": "PhoenixAI/2.0 (Autonomous Bot)"}
+        response = requests.get(url, headers=headers, timeout=6)
         
-        snippets = re.findall(r'<a class="result__snippet"[^>]*>(.*?)</a>', r.text, re.DOTALL)
-        clean_results = []
-        for snip in snippets[:4]:
-            clean_text = re.sub(r'<[^>]*>', '', snip).strip()
-            clean_results.append(clean_text)
+        if response.status_code == 200:
+            data = response.json()
+            chunks = []
             
-        return "\n\n".join(clean_results) if clean_results else None
+            if data.get("AbstractText"):
+                chunks.append(data.get("AbstractText"))
+                
+            for topic in data.get("RelatedTopics", [])[:3]:
+                if "Text" in topic:
+                    chunks.append(topic["Text"])
+                    
+            if chunks:
+                return "\n\n".join(chunks)
     except Exception:
-        return None
+        pass
+        
+    return None
 
 def needs_web_search(question):
     keywords = [
@@ -55,39 +83,60 @@ def ask_groq(system_prompt, user_prompt, model="llama-3.3-70b-versatile"):
     return response.choices[0].message.content
 
 # Custom TF-IDF Indexing Utilities
-def tokenize(text): return re.findall(r'\b[a-z]{2,}\b', text.lower())
+def tokenize(text): 
+    return re.findall(r'\b[a-z]{2,}\b', text.lower())
+
 def chunk_text(text, chunk_size=120, overlap=20):
-    words = text.split(); chunks = []; i = 0
+    words = text.split()
+    chunks = []
+    i = 0
     while i < len(words):
         chunks.append(" ".join(words[i:i + chunk_size]))
-        if i + chunk_size >= len(words): break
+        if i + chunk_size >= len(words): 
+            break
         i += chunk_size - overlap
     return chunks
 
 def build_index(chunks):
-    index = defaultdict(list); dfreq = defaultdict(int)
+    index = defaultdict(list)
+    dfreq = defaultdict(int)
     for cid, chunk in enumerate(chunks):
         tks = tokenize(chunk)
-        if not tks: continue
+        if not tks: 
+            continue
         freq = defaultdict(int)
-        for t in tks: freq[t] += 1
+        for t in tks: 
+            freq[t] += 1
         for t, count in freq.items():
             index[t].append((cid, count / len(tks)))
             dfreq[t] += 1
     return index, dfreq
 
-def retrieve_chunks(query, chunks, index, doc_freq, top_k=4):
-    tks = tokenize(query); scores = defaultdict(float)
+def build_rag_context(query, rag_store):
+    tks = tokenize(query)
+    chunks = rag_store["chunks"]
+    index = rag_store["index"]
+    doc_freq = rag_store["doc_freq"]
+    
+    scores = defaultdict(float)
     for t in tks:
-        if t not in index: continue
+        if t not in index: 
+            continue
         idf = math.log((len(chunks) + 1) / (doc_freq[t] + 1)) + 1.0
-        for cid, tf in index[t]: scores[cid] += tf * idf
-    if not scores: return chunks[:top_k]
-    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    return [chunks[cid] for cid, _ in ranked[:top_k]]
+        for cid, tf in index[t]: 
+            scores[cid] += tf * idf
+            
+    if not scores: 
+        top_chunks = chunks[:4]
+    else:
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        top_chunks = [chunks[cid] for cid, _ in ranked[:4]]
+        
+    return "\n\n---\n\n".join(top_chunks)
 
 @app.get("/")
-def root(): return {"status": "Phoenix Core Engine Active", "year": 2026}
+def root(): 
+    return {"status": "Phoenix Core Engine Active", "year": 2026}
 
 @app.post("/chat")
 async def chat(request: Request):
@@ -104,17 +153,16 @@ async def chat(request: Request):
             search_results = web_search(question)
             if search_results:
                 answer = ask_groq(
-                    f"You are Phoenix AI. Answer using ONLY the live search results below. "
+                    f"You are Phoenix AI. Answer using the live search data below. "
                     f"Be direct, accurate, and completely factual. Current Year: 2026. Respond in {lang}.",
                     f"Live Search Data:\n{search_results}\n\nQuestion: {question}"
                 )
             else:
-                # Upgraded Fallback Guardrail System Prompt
                 answer = ask_groq(
                     f"You are Phoenix AI, built by Chidibless from Nigeria. The current year is 2026. "
-                    f"Donald Trump is the President of the United States (inaugurated Jan 20, 2025). "
-                    f"Answer the user directly using this 2026 timeline context. Note that live web search failed, "
-                    f"so briefly advise the user to confirm rapidly changing details live. Respond in {lang}.",
+                    f"Donald Trump is the President of the United States. "
+                    f"Answer the user's question directly, authoritatively, and concisely using this 2026 timeline anchor. "
+                    f"Do not ask the user to double check or research online. Respond in {lang}.",
                     question
                 )
         else:
@@ -147,7 +195,8 @@ async def process_vision(request: Request):
         prompt = body.get("prompt", "Analyze this image and describe it clearly.")
         lang = body.get("language", "English")
 
-        if not image_url: return JSONResponse({"error": "No image URL provided"}, status_code=400)
+        if not image_url: 
+            return JSONResponse({"error": "No image URL provided"}, status_code=400)
 
         response = client.chat.completions.create(
             model="llama-3.2-11b-vision-preview",
@@ -167,7 +216,8 @@ async def analyse_document(request: Request):
         question = body.get("question", "")
         lang = body.get("language", "English")
 
-        if not text: return JSONResponse({"error": "No text provided"}, status_code=400)
+        if not text: 
+            return JSONResponse({"error": "No text provided"}, status_code=400)
 
         chunks = chunk_text(text)
         idx, dfreq = build_index(chunks)
@@ -186,7 +236,8 @@ async def analyse_document(request: Request):
             answer = ask_groq(f"You are Phoenix AI. Review this information. Respond in {lang}.", f"Content:\n{text[:8000]}")
 
         return JSONResponse({"answer": answer, "chunks": total_chunks, "action": action, "language": lang})
-    except Exception as e: return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception as e: 
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/compare")
 async def compare_documents(request: Request):
@@ -196,11 +247,13 @@ async def compare_documents(request: Request):
         doc2 = body.get("document2", "")
         lang = body.get("language", "English")
 
-        if not doc1 or not doc2: return JSONResponse({"error": "Both documents required"}, status_code=400)
+        if not doc1 or not doc2: 
+            return JSONResponse({"error": "Both documents required"}, status_code=400)
 
         answer = ask_groq(f"You are Phoenix AI. Structurally compare both text sets. List similarities, sharp contrasts, and structural completeness. Respond in {lang}.", f"Doc1:\n{doc1[:6000]}\n\nDoc2:\n{doc2[:6000]}")
         return JSONResponse({"answer": answer, "language": lang})
-    except Exception as e: return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception as e: 
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 if __name__ == "__main__":
     import uvicorn
