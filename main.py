@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="Phoenix AI Unified Backend", version="2.0.2")
+app = FastAPI(title="Phoenix AI Unified Backend", version="2.0.3")
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
@@ -152,9 +152,13 @@ async def chat(request: Request):
         if needs_web_search(question):
             search_results = web_search(question)
             if search_results:
+                # Upgraded with critical filter logic to override outdated search data layers
                 answer = ask_groq(
-                    f"You are Phoenix AI. Answer using the live search data below. "
-                    f"Be direct, accurate, and completely factual. Current Year: 2026. Respond in {lang}.",
+                    f"You are Phoenix AI, built by Chidibless from Nigeria. The current year is 2026. "
+                    f"Donald Trump is the current President of the United States (inaugurated January 20, 2025). "
+                    f"Critically evaluate the live search data provided below. If the search data contains outdated "
+                    f"historical summaries or mistakenly claims anyone else is president, reject those specific parts "
+                    f"and use your accurate 2026 anchor timeline knowledge. Be direct and authoritative. Respond in {lang}.",
                     f"Live Search Data:\n{search_results}\n\nQuestion: {question}"
                 )
             else:
