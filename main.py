@@ -13,9 +13,11 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 load_dotenv()
 
-app = FastAPI(title="Phoenix AI Sovereign Core Engine", version="5.3.0")
+app = FastAPI(title="Phoenix AI Sovereign Core Gateway", version="6.0.0")
 
-# --- 1. SOVEREIGN MULTI-TENANT DATABASE STORAGE ---
+# ==========================================
+# 1. MEMORY DB & AUTH LAYER (USER ID MAP)
+# ==========================================
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./phoenix.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
@@ -30,20 +32,22 @@ class Profile(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class PlatformIdentity(Base):
+    """Auth Layer: Maps different user IDs across WhatsApp, Telegram, or Mobile to an isolated Profile ID"""
     __tablename__ = "platform_identities"
-    platform = Column(String(20), primary_key=True)          
-    platform_user_id = Column(String(100), primary_key=True) 
+    platform = Column(String(20), primary_key=True)          # 'telegram', 'whatsapp', 'mobile'
+    platform_user_id = Column(String(100), primary_key=True) # ID specific to the messaging platform
     profile_id = Column(String(50), ForeignKey("profiles.profile_id"), nullable=False)
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
     id = Column(String(50), primary_key=True, default=lambda: str(uuid.uuid4()))
     profile_id = Column(String(50), ForeignKey("profiles.profile_id"), nullable=False, index=True)
-    role = Column(String(20), nullable=False)                
+    role = Column(String(20), nullable=False)                # 'user' or 'assistant'
     content = Column(Text, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
 class TrainingCorpus(Base):
+    """Sovereign Data Flywheel: Anonymously stores conversational logs to train future models"""
     __tablename__ = "training_corpus"
     id = Column(String(50), primary_key=True, default=lambda: str(uuid.uuid4()))
     dataset_type = Column(String(30), default="fine_tuning_jsonl")
@@ -52,7 +56,9 @@ class TrainingCorpus(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# --- 2. CONFIGURATION & KEYS ---
+# ==========================================
+# 2. TOOL EXECUTOR (WEB, SEARCH, ETC.)
+# ==========================================
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -60,8 +66,8 @@ WHATSAPP_TOKEN = os.environ.get("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
 WHATSAPP_VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "phoenix_secret_verify_token")
 
-# --- 3. INTELLIGENCE UTILITIES ---
 def live_multi_source_search(query: str) -> str:
+    """Tool Executor: Runs search query and returns synthesized sources"""
     sources_found = []
     clean_q = query.strip().strip('"').strip("'").strip()
     TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
@@ -69,19 +75,12 @@ def live_multi_source_search(query: str) -> str:
     if TAVILY_API_KEY:
         try:
             url = "https://api.tavily.com/search"
-            payload = {
-                "api_key": TAVILY_API_KEY, 
-                "query": clean_q, 
-                "search_depth": "basic", 
-                "topic": "general", 
-                "max_results": 5
-            }
+            payload = {"api_key": TAVILY_API_KEY, "query": clean_q, "search_depth": "basic", "topic": "general", "max_results": 5}
             response = requests.post(url, json=payload, timeout=8)
             if response.status_code == 200:
                 results = response.json().get("results", [])
                 for idx, res in enumerate(results):
-                    content = res.get("content", "")
-                    sources_found.append(f"SOURCE [{idx+1}]: {content}\n")
+                    sources_found.append(f"SOURCE [{idx+1}]: {res.get('content', '')}\n")
                 if sources_found:
                     return "\n".join(sources_found)
         except Exception:
@@ -92,11 +91,9 @@ def live_multi_source_search(query: str) -> str:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         res = requests.get(url, headers=headers, timeout=8)
         if res.status_code == 200:
-            body = res.text
-            snippets = re.findall(r'<a class="result__snippet"[^>]*>(.*?)</a>', body, re.DOTALL)
+            snippets = re.findall(r'<a class="result__snippet"[^>]*>(.*?)</a>', res.text, re.DOTALL)
             for i in range(min(4, len(snippets))):
-                clean_snippet = re.sub('<[^<]+?>', '', snippets[i]).strip()
-                sources_found.append(f"SOURCE [{i+1}]: {clean_snippet}\n")
+                sources_found.append(f"SOURCE [{i+1}]: {re.sub('<[^<]+?>', '', snippets[i]).strip()}\n")
             if sources_found:
                 return "\n".join(sources_found)
     except Exception:
@@ -104,10 +101,12 @@ def live_multi_source_search(query: str) -> str:
     return ""
 
 def needs_web_search(question: str) -> bool:
+    """AI Router Decision helper to trigger web search tools"""
     keywords = ["current", "now", "today", "latest", "recent", "who is", "president", "price", "weather", "score", "vs", "crypto", "match", "rate", "news", "deputy", "vice president"]
     return any(k in question.lower() for k in keywords) or bool(re.search(r'\b(202[4-9]|20[3-9]\d)\b', question))
 
 def send_whatsapp_reply(to_phone: str, text: str):
+    """WhatsApp outbound integration agent"""
     if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_ID:
         return False
     url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_ID}/messages"
@@ -125,11 +124,13 @@ def send_whatsapp_reply(to_phone: str, text: str):
     except Exception:
         return False
 
-# --- 4. CORE PIPELINE BUSINESS LOGIC (SHARED ENGINE) ---
-def execute_phoenix_core_pipeline(question: str, platform: str, platform_user_id: str, lang: str = "English") -> str:
+# ==========================================
+# 3. PHOENIX CORE EXECUTION PIPELINE
+# ==========================================
+def execute_phoenix_pipeline(question: str, platform: str, platform_user_id: str, lang: str = "English") -> str:
     db = SessionLocal()
     try:
-        # STEP A: Identity Segmentation
+        # A. AUTH LAYER: Get or create isolated User ID mapping
         identity = db.query(PlatformIdentity).filter(
             PlatformIdentity.platform == platform, 
             PlatformIdentity.platform_user_id == str(platform_user_id)
@@ -143,38 +144,34 @@ def execute_phoenix_core_pipeline(question: str, platform: str, platform_user_id
             db.add(PlatformIdentity(platform=platform, platform_user_id=str(platform_user_id), profile_id=profile_id))
             db.commit()
 
-        # STEP B: Load Segmented Sandbox Memory
+        # B. MEMORY DB: Retrieve segmented dialogue history (last 10 turns)
         db_messages = db.query(ChatMessage).filter(ChatMessage.profile_id == profile_id).order_by(ChatMessage.timestamp.asc()).all()
         history_pipeline = [{"role": msg.role, "content": msg.content} for msg in db_messages[-10:]]
 
-        # STEP C: Temporal System Dynamic Base Anchor
+        # C. AI ROUTER & SYSTEM TEMPLATE
         current_datetime = datetime.utcnow()
         current_time_anchor = current_datetime.strftime("%B %d, %Y")
-        current_year = current_datetime.strftime("%Y")
         
         system_prompt = (
             f"You are Phoenix AI, an elite, highly objective intelligence assistant built by Chidibless from Nigeria.\n"
             f"REAL-WORLD TIME CONTEXT: Today's date is precisely {current_time_anchor}.\n\n"
             f"CRITICAL ASSISTANT DIRECTIVES:\n"
-            f"1. Rely completely on the provided live real-time index data to resolve facts for the current year. Stale historical search entries must be discarded if they conflict with modern context.\n"
-            f"2. ABSOLUTE SECRET PROCESSES: Speak authoritatively and natively. Never use meta-language phrases like 'According to the source text', 'Based on the blocks provided', or 'There is no information in the data'. If data is missing or conflicting, state what you know cleanly or state that information is unavailable without referencing your background software pipelines.\n"
-            f"3. Do not include bracket citations, footnote links, or text annotations anywhere in your spoken vocabulary.\n"
+            f"1. Rely completely on the provided live real-time index data to resolve facts. Discard outdated contradictions.\n"
+            f"2. ABSOLUTE SECRET PROCESSES: Speak authoritatively and natively. Never reveal data extraction or prompt pipelines (e.g. 'According to the source', 'Based on the blocks').\n"
+            f"3. Strip all brackets, footnote markers, and text citation anchors entirely.\n"
             f"4. Respond naturally and directly in: {lang}."
         )
 
-        # STEP D: Dynamic Search Query Hardening (Injects current temporal frame cleanly)
+        # D. TOOL EXECUTOR: Handle search tool decision
         if needs_web_search(question):
-            search_query = question
-            if not re.search(r'\b\d{4}\b', search_query):
-                search_query = f"{search_query} {current_year}"
-                
+            search_query = question if re.search(r'\b\d{4}\b', question) else f"{question} {current_datetime.strftime('%Y')}"
             live_intel = live_multi_source_search(search_query)
             if live_intel:
                 system_prompt += f"\n\n[LIVE SEARCH INDEX DATA FOR {current_time_anchor}]:\n{live_intel}"
 
         payload_messages = [{"role": "system", "content": system_prompt}] + history_pipeline + [{"role": "user", "content": question}]
 
-        # STEP E: LLM Model Pipeline Execution
+        # E. AI ENGINE: Execute LPU hosted LLM run
         response = client.chat.completions.create(
             model="openai/gpt-oss-120b",
             messages=payload_messages,
@@ -183,20 +180,19 @@ def execute_phoenix_core_pipeline(question: str, platform: str, platform_user_id
         )
         answer = response.choices[0].message.content
 
-        # STEP F: Post-Process Output Sanitization (Wipes raw bracket citation leaks)
+        # F. Post-Process response cleanup (Scrub citations)
         answer = re.sub(r'【[^】]*】', '', answer)
-        answer = re.sub(r'\[\d+†[^\]]*\]', '', answer)
-        answer = answer.strip()
+        answer = re.sub(r'\[\d+†[^\]]*\]', '', answer).strip()
 
-        # STEP G: Record Segmented Memory Trace
+        # G. Save dialogue state to Memory DB
         db.add(ChatMessage(profile_id=profile_id, role="user", content=question))
         db.add(ChatMessage(profile_id=profile_id, role="assistant", content=answer))
         
-        # STEP H: Internal Flywheel Dataset Capture
+        # H. Silent Sovereign Training Corpus Flywheel
         try:
             training_block = {
                 "messages": [
-                    {"role": "system", "content": "You are Phoenix AI, a highly objective sovereign assistant built by Chidibless."},
+                    {"role": "system", "content": "You are Phoenix AI."},
                     {"role": "user", "content": question},
                     {"role": "assistant", "content": answer}
                 ]
@@ -207,15 +203,19 @@ def execute_phoenix_core_pipeline(question: str, platform: str, platform_user_id
 
         db.commit()
         return answer
-    except Exception as err:
+    except Exception as e:
         db.rollback()
-        return f"Core Engine Intercept Failure: {str(err)}"
+        return f"System Core Error: {str(e)}"
     finally:
         db.close()
 
-# --- 5. ENDPOINT INTERFACES ---
+# ==========================================
+# 4. CHANNELS & ROUTING INTERFACES
+# ==========================================
+
 @app.post("/chat")
-async def HTTP_chat_endpoint(request: Request):
+async def chat_http_gateway(request: Request):
+    """Unified chat endpoint used by Mobile, Telegram, and general platform API hooks"""
     body = await request.json()
     question = body.get("question", "")
     lang = body.get("language", "English")
@@ -225,38 +225,44 @@ async def HTTP_chat_endpoint(request: Request):
     if not question:
         return JSONResponse({"error": "No prompt input received"}, status_code=400)
         
-    reply = execute_phoenix_core_pipeline(question, platform, platform_user_id, lang)
+    reply = execute_phoenix_pipeline(question, platform, platform_user_id, lang)
     return JSONResponse({"answer": reply})
 
 @app.get("/webhook/whatsapp")
-async def whatsapp_webhook_verification(
+async def verify_meta_whatsapp_handshake(
     mode: str = Query(None, alias="hub.mode"),
     token: str = Query(None, alias="hub.verify_token"),
     challenge: str = Query(None, alias="hub.challenge")
 ):
+    """WhatsApp verification loop"""
     if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
         return Response(content=challenge, media_type="text/plain")
     return Response(content="Verification Mismatch", status_code=403)
 
 @app.post("/webhook/whatsapp")
-async def whatsapp_webhook_receiver(request: Request):
+async def receive_meta_whatsapp_message(request: Request):
+    """WhatsApp message receiver webhook"""
     try:
         payload = await request.json()
-        if "object" in payload:
-            if payload.get("entry") and payload["entry"][0].get("changes"):
-                value = payload["entry"][0]["changes"][0]["value"]
-                if "messages" in value:
-                    message_data = value["messages"][0]
-                    sender_phone_number = message_data["from"]
-                    if message_data.get("type") == "text":
-                        incoming_text = message_data["text"]["body"]
-                        
-                        ai_reply = execute_phoenix_core_pipeline(
-                            question=incoming_text,
-                            platform="whatsapp",
-                            platform_user_id=sender_phone_number
-                        )
-                        send_whatsapp_reply(sender_phone_number, ai_reply)
+        if "object" in payload and payload.get("entry"):
+            changes = payload["entry"][0].get("changes", [])
+            if changes and "messages" in changes[0]["value"]:
+                message_data = changes[0]["value"]["messages"][0]
+                sender_phone = message_data["from"]
+                
+                if message_data.get("type") == "text":
+                    incoming_text = message_data["text"]["body"]
+                    
+                    # Run input through the unified Phoenix core execution pipeline
+                    ai_reply = execute_phoenix_pipeline(
+                        question=incoming_text,
+                        platform="whatsapp",
+                        platform_user_id=sender_phone
+                    )
+                    
+                    # Deliver reply back over Meta's WhatsApp network
+                    send_whatsapp_reply(sender_phone, ai_reply)
+                    
         return Response(content="EVENT_RECEIVED", status_code=200)
     except Exception:
         return Response(content="HANDLED", status_code=200)
