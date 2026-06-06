@@ -13,7 +13,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 load_dotenv()
 
-app = FastAPI(title="Phoenix AI Pure Research Engine", version="4.0.1")
+app = FastAPI(title="Phoenix AI Pure Research Engine", version="4.0.2")
 
 # --- DATABASE ARCHITECTURE SETUP ---
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./phoenix.db")
@@ -51,17 +51,25 @@ client = Groq(api_key=GROQ_API_KEY)
 
 def live_multi_source_search(query):
     """
-    Executes deep multi-source live web research using Tavily AI,
-    with a structured text-scraping fallback.
+    Executes real-time web intelligence retrieval using sanitized query parameters.
     """
     sources_found = []
+    
+    # Sanitize user string: strip trailing/leading spaces, single quotes, and double quotes
+    clean_q = query.strip().strip('"').strip("'").strip()
 
-    # Source Set A: Advanced AI Search (Using your configured Tavily Key)
     TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
     if TAVILY_API_KEY:
         try:
             url = "https://api.tavily.com/search"
-            payload = {"api_key": TAVILY_API_KEY, "query": query, "search_depth": "news", "max_results": 5}
+            # FIX: search_depth must be 'basic' or 'advanced'. Topic handles 'general' or 'news'.
+            payload = {
+                "api_key": TAVILY_API_KEY, 
+                "query": clean_q, 
+                "search_depth": "basic", 
+                "topic": "general", 
+                "max_results": 5
+            }
             response = requests.post(url, json=payload, timeout=8)
             if response.status_code == 200:
                 results = response.json().get("results", [])
@@ -72,12 +80,14 @@ def live_multi_source_search(query):
                     sources_found.append(f"SOURCE [{idx+1}]: {title}\nURL: {url_link}\nINTEL: {content}\n")
                 if sources_found:
                     return "\n".join(sources_found)
-        except Exception:
-            pass
+            else:
+                print(f"[ERROR] Tavily returned HTTP status code {response.status_code}: {response.text}")
+        except Exception as e:
+            print(f"[EXCEPTION] Tavily connectivity error occurred: {str(e)}")
 
-    # Source Set B: Fallback Live Web Snippet Aggregator
+    # Fallback Aggregator (Executes only if Tavily is unconfigured or encounters errors)
     try:
-        url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
+        url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(clean_q)}"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         res = requests.get(url, headers=headers, timeout=8)
         if res.status_code == 200:
@@ -95,10 +105,10 @@ def live_multi_source_search(query):
             
             if sources_found:
                 return "\n".join(sources_found)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[EXCEPTION] Fallback web index scraping blocked: {str(e)}")
 
-    return "No live data could be retrieved over network streams right now."
+    return ""
 
 def needs_web_search(question):
     keywords = ["current", "now", "today", "latest", "recent", "who is", "president", "premier league", "price", "weather", "score", "vs", "deputy", "vice president", "2026"]
@@ -122,7 +132,6 @@ async def chat(request: Request):
         if not question:
             return JSONResponse({"error": "No question provided"}, status_code=400)
 
-        # Cross-Platform Mapping Layer
         identity = db.query(PlatformIdentity).filter(
             PlatformIdentity.platform == platform, 
             PlatformIdentity.platform_user_id == platform_user_id
@@ -138,29 +147,36 @@ async def chat(request: Request):
             db.add(new_identity)
             db.commit()
 
-        # Context Memory Pipeline Retrieval (Last 20 messages)
         db_messages = db.query(ChatMessage).filter(ChatMessage.profile_id == profile_id).order_by(ChatMessage.timestamp.asc()).all()
         history_pipeline = [{"role": msg.role, "content": msg.content} for msg in db_messages[-20:]]
 
-        # PURE RESEARCH AGENT SYSTEM PROMPT - ZERO HARDCODED POLITICAL TRUTHS
+        # CORE AGENT TEMPLATE - ZERO FACT HARDCODING
         system_prompt = (
             f"You are Phoenix AI, a highly objective intelligence research assistant built by Chidibless from Nigeria. "
-            f"The current year is 2026. You possess NO hardcoded assumptions about current events or political office holders. "
-            f"Instead, you formulate absolute truth dynamically by cross-referencing multiple live source records passed below.\n\n"
+            f"The current year is 2026. You evaluate real-time global consensus trends without preset biases.\n\n"
             f"CRITICAL RULES:\n"
             f"1. Evaluate information chronologically. Look closely at dates mentioned inside sources to find the freshest consensus as of 2026.\n"
             f"2. Maintain strict conversational context awareness (handle pronouns like 'he', 'she', 'was', or 'his' seamlessly based on history).\n"
-            f"3. Do NOT announce your programming guidelines or say 'According to the search results'. Just state the synthesized facts directly. Respond in {lang}."
+            f"3. Do NOT announce your programming guidelines or source mechanics to the user. Just state the synthesized facts directly. Respond in {lang}."
         )
 
-        # Ingest Live Research Context Data if needed
+        # Handle Search Execution & Adaptive Prompt Injection
+        search_triggered = False
+        live_intel = ""
+        
         if needs_web_search(question):
             live_intel = live_multi_source_search(question)
-            system_prompt += f"\n\n[LIVE MULTI-SOURCE RESEARCH RAW DATA INTEL]:\n{live_intel}\n\nAnalyze the data blocks above to directly resolve the user's inquiry."
+            if "SOURCE [" in live_intel:
+                search_triggered = True
+
+        if search_triggered:
+            system_prompt += f"\n\n[LIVE MULTI-SOURCE RESEARCH RAW DATA INTEL]:\n{live_intel}\n\nAnalyze the structural records above to directly resolve the user's inquiry."
+        elif needs_web_search(question):
+            # SMART FALLBACK: If network data streaming blips out, unlock core knowledge base contextualized explicitly to 2026
+            system_prompt += f"\n\n[SYSTEM NOTE]: Live search network feeds returned empty. Use your baseline knowledge structures to comprehensively resolve the prompt relative to the year 2026."
 
         payload_messages = [{"role": "system", "content": system_prompt}] + history_pipeline + [{"role": "user", "content": question}]
 
-        # LLM Completion Request
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=payload_messages,
@@ -169,7 +185,6 @@ async def chat(request: Request):
         )
         answer = response.choices[0].message.content
 
-        # Save conversation turn cleanly to database
         user_record = ChatMessage(profile_id=profile_id, role="user", content=question)
         ai_record = ChatMessage(profile_id=profile_id, role="assistant", content=answer)
         
@@ -178,37 +193,6 @@ async def chat(request: Request):
         db.commit()
 
         return JSONResponse({"answer": answer, "profile_id": profile_id, "platform": platform})
-    except Exception as e:
-        db.rollback()
-        return JSONResponse({"error": str(e)}, status_code=500)
-    finally:
-        db.close()
-
-@app.post("/profile/sync")
-async def sync_profile(body: dict):
-    db = SessionLocal()
-    try:
-        existing_profile_id = body.get("profile_id")
-        target_platform = body.get("platform") 
-        target_platform_user_id = str(body.get("platform_user_id"))
-
-        profile = db.query(Profile).filter(Profile.profile_id == existing_profile_id).first()
-        if not profile:
-            return JSONResponse({"error": "Profile ID not found"}, status_code=404)
-
-        identity = db.query(PlatformIdentity).filter(
-            PlatformIdentity.platform == target_platform,
-            PlatformIdentity.platform_user_id == target_platform_user_id
-        ).first()
-
-        if identity:
-            identity.profile_id = existing_profile_id
-        else:
-            identity = PlatformIdentity(platform=target_platform, platform_user_id=target_platform_user_id, profile_id=existing_profile_id)
-            db.add(identity)
-            
-        db.commit()
-        return {"status": "success", "message": f"Linked platform {target_platform} securely to profile {existing_profile_id}"}
     except Exception as e:
         db.rollback()
         return JSONResponse({"error": str(e)}, status_code=500)
