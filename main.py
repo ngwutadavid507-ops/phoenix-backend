@@ -8,16 +8,15 @@ from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 from groq import Groq
 from dotenv import load_dotenv
-from sqlalchemy import create_all, create_engine, Column, String, Text, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 load_dotenv()
 
-app = FastAPI(title="Phoenix AI Enterprise Backend", version="3.0.0")
+app = FastAPI(title="Phoenix AI Enterprise Backend", version="3.0.1")
 
 # --- DATABASE ARCHITECTURE SETUP ---
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./phoenix.db")
-# Fix Heroku/Render dialect formatting rule for SQLAlchemy 1.4+
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -32,19 +31,18 @@ class Profile(Base):
 
 class PlatformIdentity(Base):
     __tablename__ = "platform_identities"
-    platform = Column(String(20), primary_key=True) # "telegram", "whatsapp", "main_app"
-    platform_user_id = Column(String(100), primary_key=True) # e.g., numerical telegram ID or phone number
+    platform = Column(String(20), primary_key=True) 
+    platform_user_id = Column(String(100), primary_key=True) 
     profile_id = Column(String(50), ForeignKey("profiles.profile_id"), nullable=False)
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
     id = Column(String(50), primary_key=True, default=lambda: str(uuid.uuid4()))
     profile_id = Column(String(50), ForeignKey("profiles.profile_id"), nullable=False, index=True)
-    role = Column(String(20), nullable=False) # "user" or "assistant"
+    role = Column(String(20), nullable=False) 
     content = Column(Text, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
-# Auto-generate all tables on system launch
 Base.metadata.create_all(bind=engine)
 
 # --- AI CORE CONFIGURATION ---
@@ -94,13 +92,12 @@ async def chat(request: Request):
         body = await request.json()
         question = body.get("question", "")
         lang = body.get("language", "English")
-        platform = body.get("platform", "unknown") # Expecting "telegram", "whatsapp", or "main_app"
+        platform = body.get("platform", "unknown") 
         platform_user_id = str(body.get("user_id", body.get("chat_id", "global_user")))
 
         if not question:
             return JSONResponse({"error": "No question provided"}, status_code=400)
 
-        # 1. CROSS-PLATFORM PROFILE PROFILE SYNC RESOLVER
         identity = db.query(PlatformIdentity).filter(
             PlatformIdentity.platform == platform, 
             PlatformIdentity.platform_user_id == platform_user_id
@@ -109,7 +106,6 @@ async def chat(request: Request):
         if identity:
             profile_id = identity.profile_id
         else:
-            # If completely new user, generate unified baseline profile
             profile_id = str(uuid.uuid4())
             new_profile = Profile(profile_id=profile_id)
             new_identity = PlatformIdentity(platform=platform, platform_user_id=platform_user_id, profile_id=profile_id)
@@ -117,15 +113,12 @@ async def chat(request: Request):
             db.add(new_identity)
             db.commit()
 
-        # 2. RETRIEVE RECENT HISTORY SLICE FROM PERSISTENT STORAGE (Last 20 messages)
         db_messages = db.query(ChatMessage).filter(ChatMessage.profile_id == profile_id).order_by(ChatMessage.timestamp.asc()).all()
         
-        # Build memory format matching Groq specifications
         history_pipeline = []
-        for msg in db_messages[-20:]: # Feeds active context safely within limits
+        for msg in db_messages[-20:]: 
             history_pipeline.append({"role": msg.role, "content": msg.content})
 
-        # 3. BASELINE AGENT INSTRUCTIONS
         system_prompt = (
             f"You are Phoenix AI, a brilliant conversational assistant built by Chidibless from Nigeria. "
             f"The current year is 2026. Donald Trump is the current President of the United States. "
@@ -137,10 +130,8 @@ async def chat(request: Request):
             if search_results:
                 system_prompt += f"\n\nLive Search Context Data:\n{search_results}"
 
-        # Combine system directions, persistent database memory history, and current question
         payload_messages = [{"role": "system", "content": system_prompt}] + history_pipeline + [{"role": "user", "content": question}]
 
-        # Request transaction processing from LLM
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=payload_messages,
@@ -149,7 +140,6 @@ async def chat(request: Request):
         )
         answer = response.choices[0].message.content
 
-        # 4. SAVE CURRENT TURN PERMANENTLY TO THE DATABASE
         user_record = ChatMessage(profile_id=profile_id, role="user", content=question)
         ai_record = ChatMessage(profile_id=profile_id, role="assistant", content=answer)
         db.add(user_record)
@@ -163,20 +153,18 @@ async def chat(request: Request):
     finally:
         db.close()
 
-# --- LINK SEPARATE PLATFORMS MANUALLY TO AN EXISTING PROFILE ---
 @app.post("/profile/sync")
 async def sync_profile(body: dict):
     db = SessionLocal()
     try:
         existing_profile_id = body.get("profile_id")
-        target_platform = body.get("platform") # "telegram", "whatsapp", etc.
+        target_platform = body.get("platform") 
         target_platform_user_id = str(body.get("platform_user_id"))
 
         profile = db.query(Profile).filter(Profile.profile_id == existing_profile_id).first()
         if not profile:
             return JSONResponse({"error": "Profile ID not found"}, status_code=404)
 
-        # Upsert mapping configuration link
         identity = db.query(PlatformIdentity).filter(
             PlatformIdentity.platform == target_platform,
             PlatformIdentity.platform_user_id == target_platform_user_id
