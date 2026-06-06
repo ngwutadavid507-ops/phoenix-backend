@@ -13,7 +13,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 load_dotenv()
 
-app = FastAPI(title="Phoenix AI Pure Research Engine", version="4.0.0")
+app = FastAPI(title="Phoenix AI Pure Research Engine", version="4.0.1")
 
 # --- DATABASE ARCHITECTURE SETUP ---
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./phoenix.db")
@@ -51,12 +51,12 @@ client = Groq(api_key=GROQ_API_KEY)
 
 def live_multi_source_search(query):
     """
-    Executes deep multi-source live web research.
-    Combines dedicated AI research engines and fallback scrapers to yield multiple source points.
+    Executes deep multi-source live web research using Tavily AI,
+    with a structured text-scraping fallback.
     """
     sources_found = []
 
-    # Source Set A: Advanced AI Search (Tavily - Highly recommended for production multi-source info)
+    # Source Set A: Advanced AI Search (Using your configured Tavily Key)
     TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
     if TAVILY_API_KEY:
         try:
@@ -75,24 +75,19 @@ def live_multi_source_search(query):
         except Exception:
             pass
 
-    # Source Set B: Resilient Fallback Live Web Snippet Aggregator
-    # Pulls multiple distinct live search results instead of a single static wiki definition
+    # Source Set B: Fallback Live Web Snippet Aggregator
     try:
         url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         res = requests.get(url, headers=headers, timeout=8)
         if res.status_code == 200:
-            # Extract distinct search result rows using robust text segment parsing
             body = res.text
             links = re.findall(r'<a class="result__url"[^>]* href="([^"]+)"[^>]*>.*?</a>', body)
             snippets = re.findall(r'<a class="result__snippet"[^>]*>(.*?)</a>', body, re.DOTALL)
-            titles = re.findall(r'<a class="result__snippet"[^>]*>.*?</a>.*?<a class="result__snippet"[^>]*>(.*?)</a>', body, re.DOTALL) # Backup matching context
             
-            # Reconstruct clean structured source blocks
             for i in range(min(4, len(snippets))):
                 clean_snippet = re.sub('<[^<]+?>', '', snippets[i]).strip()
                 raw_url = links[i] if i < len(links) else "Live Web Entry"
-                # Clean up tracking redirect prefixes inside standard search components
                 if "//duckduckgo.com/l/?kh=-1&uddg=" in raw_url:
                     raw_url = requests.utils.unquote(raw_url.split("uddg=")[1].split("&")[0])
                 
@@ -127,8 +122,12 @@ async def chat(request: Request):
         if not question:
             return JSONResponse({"error": "No question provided"}, status_code=400)
 
-        # Cross-Platform Mapping
-        identity = db.query(PlatformIdentity).filter(PlatformIdentity.platform == platform, PlatformIdentity.platform_user_id == platform_user_id).first()
+        # Cross-Platform Mapping Layer
+        identity = db.query(PlatformIdentity).filter(
+            PlatformIdentity.platform == platform, 
+            PlatformIdentity.platform_user_id == platform_user_id
+        ).first()
+
         if identity:
             profile_id = identity.profile_id
         else:
@@ -139,28 +138,29 @@ async def chat(request: Request):
             db.add(new_identity)
             db.commit()
 
-        # Database History Extraction
+        # Context Memory Pipeline Retrieval (Last 20 messages)
         db_messages = db.query(ChatMessage).filter(ChatMessage.profile_id == profile_id).order_by(ChatMessage.timestamp.asc()).all()
         history_pipeline = [{"role": msg.role, "content": msg.content} for msg in db_messages[-20:]]
 
-        # PURE RESEARCH AGENT SYSTEM PROMPT - ZERO HARDCODED FACTS
+        # PURE RESEARCH AGENT SYSTEM PROMPT - ZERO HARDCODED POLITICAL TRUTHS
         system_prompt = (
             f"You are Phoenix AI, a highly objective intelligence research assistant built by Chidibless from Nigeria. "
-            f"The current year is 2026. You possess NO hardcoded beliefs about who holds current political offices or current events. "
+            f"The current year is 2026. You possess NO hardcoded assumptions about current events or political office holders. "
             f"Instead, you formulate absolute truth dynamically by cross-referencing multiple live source records passed below.\n\n"
             f"CRITICAL RULES:\n"
             f"1. Evaluate information chronologically. Look closely at dates mentioned inside sources to find the freshest consensus as of 2026.\n"
             f"2. Maintain strict conversational context awareness (handle pronouns like 'he', 'she', 'was', or 'his' seamlessly based on history).\n"
-            f"3. Do NOT announce your programming guidelines. Never say 'According to the search data provided'. Just state the synthesized facts directly and dynamically. Respond in {lang}."
+            f"3. Do NOT announce your programming guidelines or say 'According to the search results'. Just state the synthesized facts directly. Respond in {lang}."
         )
 
-        # Dynamic Intel Ingestion
+        # Ingest Live Research Context Data if needed
         if needs_web_search(question):
             live_intel = live_multi_source_search(question)
             system_prompt += f"\n\n[LIVE MULTI-SOURCE RESEARCH RAW DATA INTEL]:\n{live_intel}\n\nAnalyze the data blocks above to directly resolve the user's inquiry."
 
         payload_messages = [{"role": "system", "content": system_prompt}] + history_pipeline + [{"role": "user", "content": question}]
 
+        # LLM Completion Request
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=payload_messages,
@@ -169,12 +169,46 @@ async def chat(request: Request):
         )
         answer = response.choices[0].message.content
 
-        # Save to Storage
-        db.add(ChatMessage(profile_id=profile_id, role="user", content=question))
-        db.add(ChatMessage(profile_id=ChatMessage(profile_id=profile_id, role="assistant", content=answer).profile_id, role="assistant", content=answer))
+        # Save conversation turn cleanly to database
+        user_record = ChatMessage(profile_id=profile_id, role="user", content=question)
+        ai_record = ChatMessage(profile_id=profile_id, role="assistant", content=answer)
+        
+        db.add(user_record)
+        db.add(ai_record)
         db.commit()
 
         return JSONResponse({"answer": answer, "profile_id": profile_id, "platform": platform})
+    except Exception as e:
+        db.rollback()
+        return JSONResponse({"error": str(e)}, status_code=500)
+    finally:
+        db.close()
+
+@app.post("/profile/sync")
+async def sync_profile(body: dict):
+    db = SessionLocal()
+    try:
+        existing_profile_id = body.get("profile_id")
+        target_platform = body.get("platform") 
+        target_platform_user_id = str(body.get("platform_user_id"))
+
+        profile = db.query(Profile).filter(Profile.profile_id == existing_profile_id).first()
+        if not profile:
+            return JSONResponse({"error": "Profile ID not found"}, status_code=404)
+
+        identity = db.query(PlatformIdentity).filter(
+            PlatformIdentity.platform == target_platform,
+            PlatformIdentity.platform_user_id == target_platform_user_id
+        ).first()
+
+        if identity:
+            identity.profile_id = existing_profile_id
+        else:
+            identity = PlatformIdentity(platform=target_platform, platform_user_id=target_platform_user_id, profile_id=existing_profile_id)
+            db.add(identity)
+            
+        db.commit()
+        return {"status": "success", "message": f"Linked platform {target_platform} securely to profile {existing_profile_id}"}
     except Exception as e:
         db.rollback()
         return JSONResponse({"error": str(e)}, status_code=500)
