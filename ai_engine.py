@@ -75,9 +75,47 @@ def router_needs_search(history_messages: list) -> bool:
         "president", "governor", "deputy", "minister", "prime minister",
         "who is", "current", "latest", "news", "today", "price", "rate", 
         "exchange", "vs", "versus", "winner", "match", "score", "weather",
-        "now", "2025", "2026", "dollar", "naira", "jamb", "his", "her", "they"
+        "now", "2025", "2026", "dollar", "naira", "jamb", "his", "her", "they", "age", "old"
     ]
     return any(trigger in last_user_msg for trigger in search_triggers)
+
+async def rewrite_query_with_context(messages_list: list) -> str:
+    """
+    🧠 QUERY REWRITER LAYER:
+    Analyzes conversation history to resolve pronouns ('he', 'his deputy') 
+    into an explicit standalone Google search string.
+    """
+    if len(messages_list) <= 2:
+        return messages_list[-1]["content"]
+        
+    try:
+        # Create a lightweight context summary for a fast model pass
+        history_summary = ""
+        for msg in messages_list[-4:-1]:  # Look back up to 3 turns max
+            history_summary += f"{msg['role'].upper()}: {msg['content']}\n"
+            
+        last_prompt = messages_list[-1]["content"]
+        
+        rewrite_prompt = (
+            f"Given the following chat history conversation:\n{history_summary}\n"
+            f"And the new follow-up question: '{last_prompt}'\n\n"
+            f"Rewrite a single standalone search engine query that resolves pronouns (like 'he', 'him', 'his deputy', 'them') into the actual subjects mentioned earlier in the conversation. "
+            f"Output ONLY the final plain search query string. Do not add any conversational text or explanation."
+        )
+        
+        # Use a super fast completion to generate the optimized search string
+        response = groq_client.chat.completions.create(
+            model="llama3-8b-8192",  # Small, blindingly fast model for internal utilities
+            messages=[{"role": "user", "content": rewrite_prompt}],
+            temperature=0.0,
+            max_tokens=60
+        )
+        optimized_query = response.choices[0].message.content.strip().strip('"')
+        print(f"🔄 Query Rewriter transformed '{last_prompt}' -> '{optimized_query}'")
+        return optimized_query
+    except Exception as e:
+        print(f"Query rewriter exception: {e}")
+        return messages_list[-1]["content"]
 
 async def process_text_or_vision(user_id: str, messages_list: list, image_bytes: bytes = None):
     """Executes core routing pattern, maintaining total chat context while infusing RAG data."""
@@ -113,7 +151,7 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
             )
             return response.choices[0].message.content
 
-        # B. TEXT PROCESSING WITH FULL MEMORY RETENTION
+        # B. TEXT PROCESSING WITH FULL MEMORY RETENTION + QUERY REWRITING
         else:
             presentation_instructions = (
                 "\n\n[CRITICAL SYSTEM INSTRUCTIONS]: You are Phoenix AI, an interactive, smart chat companion—NOT a generic search engine wrapper. "
@@ -124,23 +162,22 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
             )
 
             if router_needs_search(messages_list):
-                # Build search string using both current prompt and recent context if brief
-                last_prompt = messages_list[-1]["content"]
+                # Run the contextual query rewriter to build a real standalone search string
+                optimized_search_string = await rewrite_query_with_context(messages_list)
                 
-                # Fetch fresh aggregated multi-source ground truth
-                live_web_context = await aggregate_dual_search(last_prompt)
+                # Fetch fresh aggregated multi-source ground truth using the optimized query
+                live_web_context = await aggregate_dual_search(optimized_search_string)
                 
-                # ✅ FIX: Maintain absolute complete memory history list! 
-                # We inject the data stream as a system/developer prompt guidance context layer, leaving previous turns untouched.
+                # Inject the verified search context as background data stream
                 augmented_messages = [
                     {
                         "role": "system",
-                        "content": f"LIVE SEARCH BACKGROUND MATRIX DATA:\n{live_web_context}\nUse this live context to verify real-time claims seamlessly if needed. Address the user naturally."
+                        "content": f"LIVE SEARCH BACKGROUND MATRIX DATA:\n{live_web_context}\nUse this live context to verify real-time claims seamlessly based on the conversation history thread. Current year is 2026."
                     }
                 ] + messages_list[:-1] + [
                     {
                         "role": "user",
-                        "content": f"{last_prompt}{presentation_instructions}"
+                        "content": f"{messages_list[-1]['content']}{presentation_instructions}"
                     }
                 ]
                 
