@@ -152,11 +152,12 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
             tool_calls = response_message.tool_calls
 
             if tool_calls:
-                # Append the model's tool request call to execution context history first
                 execution_messages.append(response_message)
                 
                 for tool_call in tool_calls:
                     function_name = tool_call.function.name
+                    
+                    # ✅ FIXED: Completely stripped the faulty fallback '.argv' check that was causing the crash
                     tool_args = json.loads(tool_call.function.arguments)
                     tool_content = ""
                     
@@ -175,7 +176,6 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
                         token_id = tool_args.get("token_id")
                         tool_content = await fetch_crypto_asset_metrics(token_id)
 
-                    # Append the tool's execution data stream back to the history matrix
                     execution_messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -183,7 +183,6 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
                         "content": tool_content
                     })
                 
-                # ✅ FIXED: Final generation step is moved OUT of the loop block execution layer
                 final_response = groq_client.chat.completions.create(
                     model=MODEL_NAME,
                     messages=execution_messages
