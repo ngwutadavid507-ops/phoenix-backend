@@ -2,14 +2,14 @@ import os
 import httpx
 from openai import AsyncOpenAI
 
-# We use the standard OpenAI client but route it directly to Groq's free endpoint
+# Point to Groq's open-source gateway infrastructure
 client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=os.getenv("GROQ_API_KEY")
 )
 
 async def process_text_or_vision(user_id: str, prompt: str, image_bytes: bytes = None) -> str:
-    """Processes textual tech queries using a free Llama 3 model via Groq endpoint."""
+    """Processes textual tech queries using a current, live production model on Groq."""
     system_instruction = (
         "You are Phoenix AI, a strict assistant for tech architecture and project execution. "
         "Keep your output clean, actionable, and formatted beautifully for mobile messaging screens."
@@ -25,9 +25,9 @@ async def process_text_or_vision(user_id: str, prompt: str, image_bytes: bytes =
         {"role": "user", "content": prompt}
     ]
 
-    # Calling Llama 3 on Groq using the compatible OpenAI client format
+    # Swapped decommissioned string for the active live flagship model ID
     response = await client.chat.completions.create(
-        model="llama3-70b-8192",
+        model="llama-3.3-70b-versatile",
         messages=messages
     )
     return response.choices[0].message.content
