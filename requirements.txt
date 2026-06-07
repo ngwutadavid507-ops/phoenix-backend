@@ -3,3 +3,5 @@ uvicorn
 httpx
 groq
 pydantic
+tavily-python
+google-search-results
