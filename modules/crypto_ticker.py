@@ -1,20 +1,54 @@
 # modules/crypto_ticker.py
 import httpx
 
+def map_token_to_symbol(token_id: str) -> str:
+    """Maps common token names and symbols to Binance USDT pairs."""
+    val = token_id.lower().strip()
+    mapping = {
+        "bitcoin": "BTCUSDT",
+        "btc": "BTCUSDT",
+        "ethereum": "ETHUSDT",
+        "eth": "ETHUSDT",
+        "solana": "SOLUSDT",
+        "sol": "SOLUSDT",
+        "binancecoin": "BNBUSDT",
+        "bnb": "BNBUSDT",
+        "ripple": "XRPUSDT",
+        "xrp": "XRPUSDT",
+        "cardano": "ADAUSDT",
+        "ada": "ADAUSDT",
+        "hyperliquid": "HYPEUSDT",
+        "hype": "HYPEUSDT",
+        "arbitrum": "ARBUSDT",
+        "arb": "ARBUSDT"
+    }
+    return mapping.get(val, f"{val.upper()}USDT")
+
 async def fetch_crypto_asset_metrics(token_id: str) -> str:
-    """Queries live valuation updates for targeted decentralized token configurations."""
-    token_id = token_id.lower().strip()
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={token_id}&vs_currencies=usd&include_24hr_change=true"
+    """Queries live valuation metrics using the ultra-stable, un-rate-limited Binance Public API."""
+    symbol = map_token_to_symbol(token_id)
+    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
     
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, timeout=5.0)
             if response.status_code == 200:
                 data = response.json()
-                if token_id in data:
-                    usd_price = data[token_id].get("usd")
-                    day_change = data[token_id].get("usd_24h_change", 0.0)
-                    return f"\n--- CRYPTO TICKER DATA ---\nAsset: {token_id.upper()}\nValue: ${usd_price:,} USD\n24H Shift Vector: {day_change:.2f}%"
-        return f"\n[Asset ticker information matching '{token_id}' presently unreachable or invalid.]"
+                last_price = float(data.get("lastPrice", 0.0))
+                price_change_percent = float(data.get("priceChangePercent", 0.0))
+                high_price = float(data.get("highPrice", 0.0))
+                low_price = float(data.get("lowPrice", 0.0))
+                
+                return (
+                    f"\n--- CRYPTO TICKER DATA ---\n"
+                    f"Asset Pair: {symbol}\n"
+                    f"Current Price: ${last_price:,.2f} USD\n"
+                    f"24H Change: {price_change_percent:+.2f}%\n"
+                    f"24H High: ${high_price:,.2f} USD\n"
+                    f"24H Low: ${low_price:,.2f} USD\n"
+                )
+            elif response.status_code == 400:
+                return f"\n[Asset symbol '{symbol}' not found on active exchange pairs.]"
+            return f"\n[Exchange data source returned an unexpected status code: {response.status_code}]"
     except Exception as e:
-        return f"\n[Crypto API pipeline communication glitch: {e}]"
+        return f"\n[Crypto API pipeline transmission failure: {e}]"

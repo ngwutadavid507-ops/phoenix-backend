@@ -60,7 +60,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "aggregate_dual_search",
-            "description": "Call this tool for live events, current presidents, real-time facts, conversion rates, or data requiring up-to-date info for the current year (2026).",
+            "description": "Call this tool for live events, general news updates, real-time facts, fiat conversion rates, or data requiring up-to-date info for the current year (2026).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -89,11 +89,11 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "lookup_crypto_metrics",
-            "description": "Call this tool when the user requests current pricing or market metric positions for crypto or DeFi assets.",
+            "description": "Call this tool when the user requests current pricing, token tickers, or live market metrics for crypto assets.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "token_id": {"type": "string", "description": "The asset identifier string (e.g., 'bitcoin', 'ethereum', 'solana', 'hyperliquid')."}
+                    "token_id": {"type": "string", "description": "The token symbol or asset identifier string (e.g., 'BTC', 'ethereum', 'sol', 'hype')."}
                 },
                 "required": ["token_id"]
             }
@@ -132,8 +132,8 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
             presentation_instructions = (
                 f"\n\n[CRITICAL SYSTEM INSTRUCTIONS]: You are Phoenix AI, a smart chat companion. "
                 f"The current year is 2026. Maintain multi-turn tracking thread consistency. "
-                f"Format beautifully using bold titles and structured bullet points optimized for screens. "
-                f"Never output debugging JSON strings or tool trace payloads directly."
+                f"Format beautifully using bold titles and structured bullet points optimized for mobile screens. "
+                f"Never output debugging JSON strings or tool trace payloads directly to the user."
                 f"{profile_context_snippet}"
                 f"{doc_context_snippet}"
             )
@@ -152,9 +152,11 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
             tool_calls = response_message.tool_calls
 
             if tool_calls:
+                # Append the model's tool request call to execution context history first
+                execution_messages.append(response_message)
+                
                 for tool_call in tool_calls:
                     function_name = tool_call.function.name
-                    # ✅ FIXED: Corrected fallback mapping reference pattern to use .arguments strictly
                     tool_args = json.loads(tool_call.function.arguments)
                     tool_content = ""
                     
@@ -173,19 +175,20 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
                         token_id = tool_args.get("token_id")
                         tool_content = await fetch_crypto_asset_metrics(token_id)
 
-                    execution_messages.append(response_message)
+                    # Append the tool's execution data stream back to the history matrix
                     execution_messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "name": function_name,
                         "content": tool_content
                     })
-                    
-                    final_response = groq_client.chat.completions.create(
-                        model=MODEL_NAME,
-                        messages=execution_messages
-                    )
-                    return final_response.choices[0].message.content
+                
+                # ✅ FIXED: Final generation step is moved OUT of the loop block execution layer
+                final_response = groq_client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=execution_messages
+                )
+                return final_response.choices[0].message.content
 
             return response_message.content
 
