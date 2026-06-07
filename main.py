@@ -50,7 +50,6 @@ async def send_whatsapp_media(to: str, media_url: str, media_type: str = "image"
 async def whatsapp_webhook(request: Request):
     payload = await request.json()
     try:
-        # Check if it's a standard message status update or actual message content
         value = payload["entry"][0]["changes"][0]["value"]
         if "messages" not in value:
             return Response(content="OK", status_code=200)
@@ -104,3 +103,8 @@ async def whatsapp_verification(request: Request):
     if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == verify_token:
         return Response(content=params.get("hub.challenge"), status_code=200)
     return Response(content="Verification mismatch", status_code=403)
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
