@@ -4,12 +4,12 @@ from groq import Groq
 from tavily import TavilyClient
 from serpapi import GoogleSearch
 
-# Core Integration API Clients
+# Core Integration API Clients (Read gracefully on startup)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
 MODEL_NAME = "llama-3.3-70b-versatile"
@@ -26,14 +26,16 @@ def fetch_tavily_results(query: str) -> str:
         for res in results:
             context_str += f"Context Chunk: {res.get('content')}\n\n"
         return context_str
-    except Exception:
+    except Exception as e:
+        print(f"Tavily background error: {e}")
         return ""
 
 def fetch_serpapi_results(query: str) -> str:
-    """Queries SerpApi for direct raw organic Google Search results coverage."""
+    """Queries SerpApi safely inside an execution block only when requested."""
     if not SERPAPI_API_KEY:
         return ""
     try:
+        # ✅ Instantiated dynamically inside the function scope to prevent boot blocking
         search = GoogleSearch({
             "q": query,
             "api_key": SERPAPI_API_KEY,
@@ -50,7 +52,8 @@ def fetch_serpapi_results(query: str) -> str:
         for res in organic_results:
             context_str += f"Snippet: {res.get('snippet')}\n\n"
         return context_str
-    except Exception:
+    except Exception as e:
+        print(f"SerpApi background error: {e}")
         return ""
 
 async def aggregate_dual_search(query: str) -> str:
@@ -118,7 +121,6 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
 
         # B. TEXT PROCESSING WITH BEAUTIFIED STRUCTURAL FRAMING
         else:
-            # Layout the design rules inside the system context dynamically
             presentation_instructions = (
                 "\n\n[PRESENTATION INSTRUCTIONS]: Format your output beautifully for a premium mobile chat application (Telegram/WhatsApp). "
                 "1. Use bold headings (**Heading**) to split distinct thoughts.\n"
@@ -131,10 +133,8 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
             if router_needs_search(messages_list):
                 last_prompt = messages_list[-1]["content"]
                 
-                # Fetch fresh aggregated multi-source ground truth
                 live_web_context = await aggregate_dual_search(last_prompt)
                 
-                # Inject the real-time context alongside the strict presentation rules
                 augmented_messages = messages_list[:-1] + [
                     {
                         "role": "user", 
@@ -151,7 +151,6 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
                     messages=augmented_messages
                 )
             else:
-                # Add presentation framing to regular conversation flow as well
                 modified_messages = messages_list[:-1] + [
                     {
                         "role": "user",
