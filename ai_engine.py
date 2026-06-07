@@ -5,13 +5,14 @@ from groq import Groq
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
-# ✅ UPDATED TO AN ACTIVE PRODUCTION MODEL TIER
+# Active, supported production model tier
 MODEL_NAME = "llama-3.3-70b-versatile"
 
-async def process_text_or_vision(user_id: str, prompt: str, image_bytes: bytes = None):
+async def process_text_or_vision(user_id: str, messages_list: list, image_bytes: bytes = None):
     """
-    Processes multi-platform requests through the active Groq inference platform.
-    If image_bytes is provided, handles multimodal vision analysis context.
+    Processes requests through Groq.
+    - If image_bytes is provided, processes it using a vision-capable model.
+    - Otherwise, processes the entire conversational history thread.
     """
     try:
         if not GROQ_API_KEY:
@@ -19,10 +20,12 @@ async def process_text_or_vision(user_id: str, prompt: str, image_bytes: bytes =
 
         # A. MULTIMODAL VISION TRACK
         if image_bytes:
-            # Note: Groq uses specific vision models like llama-3.2-11b-vision-preview for images
             vision_model = "llama-3.2-11b-vision-preview"
             import base64
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            
+            # For vision, we pull the last text content or fallback
+            last_prompt = messages_list[-1]["content"] if messages_list else "Analyze this image payload."
             
             response = client.chat.completions.create(
                 model=vision_model,
@@ -30,7 +33,7 @@ async def process_text_or_vision(user_id: str, prompt: str, image_bytes: bytes =
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": prompt if prompt else "Analyze this image payload."},
+                            {"type": "text", "text": last_prompt},
                             {
                                 "type": "image_url",
                                 "image_url": {
@@ -44,14 +47,11 @@ async def process_text_or_vision(user_id: str, prompt: str, image_bytes: bytes =
             )
             return response.choices[0].message.content
 
-        # B. TEXT PROCESSING TRACK
+        # B. TEXT PROCESSING TRACK (With full conversation history context)
         else:
             response = client.chat.completions.create(
                 model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": "You are Phoenix AI, a privacy-centric cross-platform system assistant."},
-                    {"role": "user", "content": prompt}
-                ]
+                messages=messages_list
             )
             return response.choices[0].message.content
 
@@ -60,15 +60,12 @@ async def process_text_or_vision(user_id: str, prompt: str, image_bytes: bytes =
         return f"⚠️ Phoenix AI Engine Error: Unable to complete message processing. ({e})"
 
 async def generate_image_url(prompt: str) -> str:
-    """Fallback utility for routing canvas design requests to open image endpoints."""
     import urllib.parse
     encoded_prompt = urllib.parse.quote(prompt)
     return f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
 
 async def transcribe_voice_bytes(audio_bytes: bytes, filename: str) -> str:
-    """Routes binary audio payloads to Groq's Whisper architecture for processing."""
     try:
-        # Save bytes temporarily to pass to the client library file handler
         with open(filename, "wb") as f:
             f.write(audio_bytes)
             
