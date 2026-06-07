@@ -17,22 +17,22 @@ MODEL_NAME = "llama-3.3-70b-versatile"
 def fetch_tavily_results(query: str) -> str:
     """Queries Tavily API for semantic, LLM-optimized web documentation chunks."""
     if not tavily_client:
-        return "⚠️ Tavily Engine: Client unconfigured (Missing Key).\n"
+        return ""
     try:
         response = tavily_client.search(query=query, max_results=3, search_depth="advanced")
         results = response.get("results", [])
         
-        context_str = "--- TAVILY LIVE INSIGHTS ---\n"
+        context_str = "--- TAVILY LIVE DATA ---\n"
         for res in results:
-            context_str += f"• {res.get('title')} ({res.get('url')}):\n  {res.get('content')}\n\n"
+            context_str += f"Context Chunk: {res.get('content')}\n\n"
         return context_str
-    except Exception as e:
-        return f"⚠️ Tavily Lookup Failed: {e}\n"
+    except Exception:
+        return ""
 
 def fetch_serpapi_results(query: str) -> str:
     """Queries SerpApi for direct raw organic Google Search results coverage."""
     if not SERPAPI_API_KEY:
-        return "⚠️ SerpApi Engine: Client unconfigured (Missing Key).\n"
+        return ""
     try:
         search = GoogleSearch({
             "q": query,
@@ -42,63 +42,48 @@ def fetch_serpapi_results(query: str) -> str:
         dictionary_results = search.get_dict()
         organic_results = dictionary_results.get("organic_results", [])
         
-        context_str = "--- SERPAPI GOOGLE SEARCH EXTRACTIONS ---\n"
-        # Check for instant direct answers if available on Google
+        context_str = "--- SERPAPI GOOGLE SEARCH DATA ---\n"
         if "answer_box" in dictionary_results:
             box = dictionary_results["answer_box"]
-            if "answer" in box:
-                context_str += f"⚡ Direct Answer Box: {box.get('answer')}\n\n"
-            elif "snippet" in box:
-                context_str += f"⚡ Direct Answer Box Snippet: {box.get('snippet')}\n\n"
+            context_str += f"Direct Answer: {box.get('answer') or box.get('snippet')}\n\n"
 
         for res in organic_results:
-            context_str += f"• {res.get('title')} ({res.get('link')}):\n  {res.get('snippet')}\n\n"
+            context_str += f"Snippet: {res.get('snippet')}\n\n"
         return context_str
-    except Exception as e:
-        return f"⚠️ SerpApi Lookup Failed: {e}\n"
+    except Exception:
+        return ""
 
 async def aggregate_dual_search(query: str) -> str:
     """Runs Tavily and SerpApi queries concurrently via asyncio threads to preserve speed."""
     loop = asyncio.get_event_loop()
     
-    # Offload blocking synchronous network IO requests to worker threads
     tavily_task = loop.run_in_executor(None, fetch_tavily_results, query)
     serpapi_task = loop.run_in_executor(None, fetch_serpapi_results, query)
     
     tavily_res, serpapi_res = await asyncio.gather(tavily_task, serpapi_task)
     
     combined_context = (
-        "=== COOPERATIVE REAL-TIME GROUND TRUTH SEARCH MATRIX ===\n"
-        f"{tavily_res}"
+        f"{tavily_res}\n"
         f"{serpapi_res}"
-        "========================================================\n"
     )
     return combined_context
 
 def router_needs_search(history_messages: list) -> bool:
-    """
-    Intelligent Router Engine: Evaluates the latest user prompt 
-    to decide if it requires external real-time data lookup.
-    """
+    """Intelligent Router Engine: Evaluates the latest user prompt for real-time triggers."""
     if not history_messages:
         return False
         
     last_user_msg = history_messages[-1]["content"].lower()
-    
     search_triggers = [
         "president", "governor", "deputy", "minister", "prime minister",
         "who is", "current", "latest", "news", "today", "price", "rate", 
         "exchange", "vs", "versus", "winner", "match", "score", "weather",
         "now", "2025", "2026", "dollar", "naira", "jamb"
     ]
-    
     return any(trigger in last_user_msg for trigger in search_triggers)
 
 async def process_text_or_vision(user_id: str, messages_list: list, image_bytes: bytes = None):
-    """
-    Executes core routing pattern combining Multi-turn Memory, 
-    Dual-Search Cross-Verification RAG, and Vision pipelines.
-    """
+    """Executes core routing pattern with high-fidelity, polished markdown outputs."""
     try:
         if not GROQ_API_KEY:
             return "❌ Engine Configuration Error: GROQ_API_KEY environment variable is missing on Render."
@@ -117,7 +102,7 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": last_prompt},
+                            {"type": "text", "text": f"{last_prompt}\nProvide a beautifully formatted, clean analysis of this image. Use bullet points and bold headers where appropriate."},
                             {
                                 "type": "image_url",
                                 "image_url": {
@@ -131,20 +116,33 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
             )
             return response.choices[0].message.content
 
-        # B. TEXT PROCESSING WITH ROUTER + DUAL SEARCH AGGREGATION
+        # B. TEXT PROCESSING WITH BEAUTIFIED STRUCTURAL FRAMING
         else:
+            # Layout the design rules inside the system context dynamically
+            presentation_instructions = (
+                "\n\n[PRESENTATION INSTRUCTIONS]: Format your output beautifully for a premium mobile chat application (Telegram/WhatsApp). "
+                "1. Use bold headings (**Heading**) to split distinct thoughts.\n"
+                "2. Use emojis naturally at the start of sections to make it visually engaging but keep it professional.\n"
+                "3. Use clean, spaced bullet points for lists.\n"
+                "4. Absolutely never print raw URLs, source markers, code variables, or snippets from the background search data text.\n"
+                "5. Keep the language direct, elegant, and crisp. No fluff or conversational filler like 'Sure, let me search that for you'."
+            )
+
             if router_needs_search(messages_list):
                 last_prompt = messages_list[-1]["content"]
-                print(f"📡 Dual Router Fired: Gathering live search context for: '{last_prompt}'")
                 
                 # Fetch fresh aggregated multi-source ground truth
                 live_web_context = await aggregate_dual_search(last_prompt)
                 
-                # Append context directly into the current execution thread safely
+                # Inject the real-time context alongside the strict presentation rules
                 augmented_messages = messages_list[:-1] + [
                     {
                         "role": "user", 
-                        "content": f"{live_web_context}\nUsing the highly verified search context provided above, answer this request accurately. If information contradicts your internal pre-training cutoff data, give absolute priority to the verified live search context: {last_prompt}"
+                        "content": (
+                            f"=== BACKGROUND SEARCH CONTEXT ===\n{live_web_context}\n\n"
+                            f"User Query: {last_prompt}\n"
+                            f"Using the verified search context above, synthesize a complete answer. {presentation_instructions}"
+                        )
                     }
                 ]
                 
@@ -153,9 +151,16 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
                     messages=augmented_messages
                 )
             else:
+                # Add presentation framing to regular conversation flow as well
+                modified_messages = messages_list[:-1] + [
+                    {
+                        "role": "user",
+                        "content": f"{messages_list[-1]['content']}{presentation_instructions}"
+                    }
+                ]
                 response = groq_client.chat.completions.create(
                     model=MODEL_NAME,
-                    messages=messages_list
+                    messages=modified_messages
                 )
                 
             return response.choices[0].message.content
