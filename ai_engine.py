@@ -154,7 +154,8 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
             if tool_calls:
                 for tool_call in tool_calls:
                     function_name = tool_call.function.name
-                    tool_args = json.loads(tool_call.function.arguments or tool_call.function.argv)
+                    # ✅ FIXED: Corrected fallback mapping reference pattern to use .arguments strictly
+                    tool_args = json.loads(tool_call.function.arguments)
                     tool_content = ""
                     
                     if function_name == "aggregate_dual_search":

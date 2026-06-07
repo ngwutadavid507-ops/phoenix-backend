@@ -5,3 +5,4 @@ groq
 pydantic
 tavily-python
 google-search-results
+pypdf>=4.0.0
