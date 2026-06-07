@@ -4,7 +4,7 @@ from groq import Groq
 from tavily import TavilyClient
 from serpapi import GoogleSearch
 
-# Core Integration API Clients (Read gracefully on startup)
+# Core Integration API Clients
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
@@ -35,7 +35,6 @@ def fetch_serpapi_results(query: str) -> str:
     if not SERPAPI_API_KEY:
         return ""
     try:
-        # ✅ Instantiated dynamically inside the function scope to prevent boot blocking
         search = GoogleSearch({
             "q": query,
             "api_key": SERPAPI_API_KEY,
@@ -64,12 +63,7 @@ async def aggregate_dual_search(query: str) -> str:
     serpapi_task = loop.run_in_executor(None, fetch_serpapi_results, query)
     
     tavily_res, serpapi_res = await asyncio.gather(tavily_task, serpapi_task)
-    
-    combined_context = (
-        f"{tavily_res}\n"
-        f"{serpapi_res}"
-    )
-    return combined_context
+    return f"{tavily_res}\n{serpapi_res}"
 
 def router_needs_search(history_messages: list) -> bool:
     """Intelligent Router Engine: Evaluates the latest user prompt for real-time triggers."""
@@ -81,12 +75,12 @@ def router_needs_search(history_messages: list) -> bool:
         "president", "governor", "deputy", "minister", "prime minister",
         "who is", "current", "latest", "news", "today", "price", "rate", 
         "exchange", "vs", "versus", "winner", "match", "score", "weather",
-        "now", "2025", "2026", "dollar", "naira", "jamb"
+        "now", "2025", "2026", "dollar", "naira", "jamb", "his", "her", "they"
     ]
     return any(trigger in last_user_msg for trigger in search_triggers)
 
 async def process_text_or_vision(user_id: str, messages_list: list, image_bytes: bytes = None):
-    """Executes core routing pattern with high-fidelity, polished markdown outputs."""
+    """Executes core routing pattern, maintaining total chat context while infusing RAG data."""
     try:
         if not GROQ_API_KEY:
             return "❌ Engine Configuration Error: GROQ_API_KEY environment variable is missing on Render."
@@ -119,30 +113,34 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
             )
             return response.choices[0].message.content
 
-        # B. TEXT PROCESSING WITH BEAUTIFIED STRUCTURAL FRAMING
+        # B. TEXT PROCESSING WITH FULL MEMORY RETENTION
         else:
             presentation_instructions = (
-                "\n\n[PRESENTATION INSTRUCTIONS]: Format your output beautifully for a premium mobile chat application (Telegram/WhatsApp). "
-                "1. Use bold headings (**Heading**) to split distinct thoughts.\n"
-                "2. Use emojis naturally at the start of sections to make it visually engaging but keep it professional.\n"
-                "3. Use clean, spaced bullet points for lists.\n"
-                "4. Absolutely never print raw URLs, source markers, code variables, or snippets from the background search data text.\n"
-                "5. Keep the language direct, elegant, and crisp. No fluff or conversational filler like 'Sure, let me search that for you'."
+                "\n\n[CRITICAL SYSTEM INSTRUCTIONS]: You are Phoenix AI, an interactive, smart chat companion—NOT a generic search engine wrapper. "
+                "1. Maintain a natural, organic conversational flow. Follow the multi-turn memory thread explicitly.\n"
+                "2. Synthesize answers dynamically using background context. Never copy-paste raw definitions, links, or chunks.\n"
+                "3. Format beautifully using bold titles and spaced mobile-optimized bullet points.\n"
+                "4. Keep your response laser-focused on exactly what was asked. Avoid irrelevant text dumps."
             )
 
             if router_needs_search(messages_list):
+                # Build search string using both current prompt and recent context if brief
                 last_prompt = messages_list[-1]["content"]
                 
+                # Fetch fresh aggregated multi-source ground truth
                 live_web_context = await aggregate_dual_search(last_prompt)
                 
-                augmented_messages = messages_list[:-1] + [
+                # ✅ FIX: Maintain absolute complete memory history list! 
+                # We inject the data stream as a system/developer prompt guidance context layer, leaving previous turns untouched.
+                augmented_messages = [
                     {
-                        "role": "user", 
-                        "content": (
-                            f"=== BACKGROUND SEARCH CONTEXT ===\n{live_web_context}\n\n"
-                            f"User Query: {last_prompt}\n"
-                            f"Using the verified search context above, synthesize a complete answer. {presentation_instructions}"
-                        )
+                        "role": "system",
+                        "content": f"LIVE SEARCH BACKGROUND MATRIX DATA:\n{live_web_context}\nUse this live context to verify real-time claims seamlessly if needed. Address the user naturally."
+                    }
+                ] + messages_list[:-1] + [
+                    {
+                        "role": "user",
+                        "content": f"{last_prompt}{presentation_instructions}"
                     }
                 ]
                 
@@ -151,6 +149,7 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
                     messages=augmented_messages
                 )
             else:
+                # Regular conversation tracking matching memory stream
                 modified_messages = messages_list[:-1] + [
                     {
                         "role": "user",
