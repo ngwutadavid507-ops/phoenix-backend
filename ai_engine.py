@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 from groq import Groq
 from tavily import TavilyClient
@@ -15,23 +16,22 @@ tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 MODEL_NAME = "llama-3.3-70b-versatile"
 
 def fetch_tavily_results(query: str) -> str:
-    """Queries Tavily API for semantic, LLM-optimized web documentation chunks."""
+    """Queries Tavily API for semantic web documentation chunks."""
     if not tavily_client:
         return ""
     try:
         response = tavily_client.search(query=query, max_results=3, search_depth="advanced")
         results = response.get("results", [])
-        
         context_str = "--- TAVILY LIVE DATA ---\n"
         for res in results:
-            context_str += f"Context Chunk: {res.get('content')}\n\n"
+            context_str += f"Context: {res.get('content')}\n\n"
         return context_str
     except Exception as e:
         print(f"Tavily background error: {e}")
         return ""
 
 def fetch_serpapi_results(query: str) -> str:
-    """Queries SerpApi safely inside an execution block only when requested."""
+    """Queries SerpApi safely for live organic Google results."""
     if not SERPAPI_API_KEY:
         return ""
     try:
@@ -56,7 +56,8 @@ def fetch_serpapi_results(query: str) -> str:
         return ""
 
 async def aggregate_dual_search(query: str) -> str:
-    """Runs Tavily and SerpApi queries concurrently via asyncio threads to preserve speed."""
+    """Runs Tavily and SerpApi concurrently to maximize execution speed."""
+    print(f"📡 High-Speed Parallel Search triggering for query: '{query}'")
     loop = asyncio.get_event_loop()
     
     tavily_task = loop.run_in_executor(None, fetch_tavily_results, query)
@@ -65,60 +66,29 @@ async def aggregate_dual_search(query: str) -> str:
     tavily_res, serpapi_res = await asyncio.gather(tavily_task, serpapi_task)
     return f"{tavily_res}\n{serpapi_res}"
 
-def router_needs_search(history_messages: list) -> bool:
-    """Intelligent Router Engine: Evaluates the latest user prompt for real-time triggers."""
-    if not history_messages:
-        return False
-        
-    last_user_msg = history_messages[-1]["content"].lower()
-    search_triggers = [
-        "president", "governor", "deputy", "minister", "prime minister",
-        "who is", "current", "latest", "news", "today", "price", "rate", 
-        "exchange", "vs", "versus", "winner", "match", "score", "weather",
-        "now", "2025", "2026", "dollar", "naira", "jamb", "his", "her", "they", "age", "old"
-    ]
-    return any(trigger in last_user_msg for trigger in search_triggers)
-
-async def rewrite_query_with_context(messages_list: list) -> str:
-    """
-    🧠 QUERY REWRITER LAYER:
-    Analyzes conversation history to resolve pronouns ('he', 'his deputy') 
-    into an explicit standalone Google search string.
-    """
-    if len(messages_list) <= 2:
-        return messages_list[-1]["content"]
-        
-    try:
-        # Create a lightweight context summary for a fast model pass
-        history_summary = ""
-        for msg in messages_list[-4:-1]:  # Look back up to 3 turns max
-            history_summary += f"{msg['role'].upper()}: {msg['content']}\n"
-            
-        last_prompt = messages_list[-1]["content"]
-        
-        rewrite_prompt = (
-            f"Given the following chat history conversation:\n{history_summary}\n"
-            f"And the new follow-up question: '{last_prompt}'\n\n"
-            f"Rewrite a single standalone search engine query that resolves pronouns (like 'he', 'him', 'his deputy', 'them') into the actual subjects mentioned earlier in the conversation. "
-            f"Output ONLY the final plain search query string. Do not add any conversational text or explanation."
-        )
-        
-        # Use a super fast completion to generate the optimized search string
-        response = groq_client.chat.completions.create(
-            model="llama3-8b-8192",  # Small, blindingly fast model for internal utilities
-            messages=[{"role": "user", "content": rewrite_prompt}],
-            temperature=0.0,
-            max_tokens=60
-        )
-        optimized_query = response.choices[0].message.content.strip().strip('"')
-        print(f"🔄 Query Rewriter transformed '{last_prompt}' -> '{optimized_query}'")
-        return optimized_query
-    except Exception as e:
-        print(f"Query rewriter exception: {e}")
-        return messages_list[-1]["content"]
+# Define the unified tool structural schema for Groq's router
+TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "aggregate_dual_search",
+            "description": "Call this tool when the user asks about live events, current presidents, real-time facts, conversion rates, or any information requiring up-to-date data for the current year (2026).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The optimized standalone search query string, resolving any pronoun contextual references (e.g., transforming 'how old is he' into 'Emmanuel Macron age')."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    }
+]
 
 async def process_text_or_vision(user_id: str, messages_list: list, image_bytes: bytes = None):
-    """Executes core routing pattern, maintaining total chat context while infusing RAG data."""
+    """Executes high-speed native tool routing while strictly maintaining chat history threads."""
     try:
         if not GROQ_API_KEY:
             return "❌ Engine Configuration Error: GROQ_API_KEY environment variable is missing on Render."
@@ -137,13 +107,8 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": f"{last_prompt}\nProvide a beautifully formatted, clean analysis of this image. Use bullet points and bold headers where appropriate."},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
-                                }
-                            }
+                            {"type": "text", "text": f"{last_prompt}\nProvide a beautifully formatted, clean analysis of this image."},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                         ]
                     }
                 ],
@@ -151,57 +116,66 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
             )
             return response.choices[0].message.content
 
-        # B. TEXT PROCESSING WITH FULL MEMORY RETENTION + QUERY REWRITING
+        # B. TEXT PROCESSING WITH NATIVE SPEED ROUTING TOOL CALLS
         else:
             presentation_instructions = (
-                "\n\n[CRITICAL SYSTEM INSTRUCTIONS]: You are Phoenix AI, an interactive, smart chat companion—NOT a generic search engine wrapper. "
-                "1. Maintain a natural, organic conversational flow. Follow the multi-turn memory thread explicitly.\n"
-                "2. Synthesize answers dynamically using background context. Never copy-paste raw definitions, links, or chunks.\n"
-                "3. Format beautifully using bold titles and spaced mobile-optimized bullet points.\n"
-                "4. Keep your response laser-focused on exactly what was asked. Avoid irrelevant text dumps."
+                "\n\n[CRITICAL SYSTEM INSTRUCTIONS]: You are Phoenix AI, an interactive, smart chat companion. "
+                "The current year is 2026. Follow the multi-turn memory thread explicitly. "
+                "Format beautifully using bold titles and clean spaced mobile-optimized bullet points. "
+                "Never dump raw variables, code markers, or background JSON strings into the final chat output."
             )
 
-            if router_needs_search(messages_list):
-                # Run the contextual query rewriter to build a real standalone search string
-                optimized_search_string = await rewrite_query_with_context(messages_list)
-                
-                # Fetch fresh aggregated multi-source ground truth using the optimized query
-                live_web_context = await aggregate_dual_search(optimized_search_string)
-                
-                # Inject the verified search context as background data stream
-                augmented_messages = [
-                    {
-                        "role": "system",
-                        "content": f"LIVE SEARCH BACKGROUND MATRIX DATA:\n{live_web_context}\nUse this live context to verify real-time claims seamlessly based on the conversation history thread. Current year is 2026."
-                    }
-                ] + messages_list[:-1] + [
-                    {
-                        "role": "user",
-                        "content": f"{messages_list[-1]['content']}{presentation_instructions}"
-                    }
-                ]
-                
-                response = groq_client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=augmented_messages
-                )
-            else:
-                # Regular conversation tracking matching memory stream
-                modified_messages = messages_list[:-1] + [
-                    {
-                        "role": "user",
-                        "content": f"{messages_list[-1]['content']}{presentation_instructions}"
-                    }
-                ]
-                response = groq_client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=modified_messages
-                )
-                
-            return response.choices[0].message.content
+            # Build contextual execution payload matching current instructions
+            execution_messages = []
+            for msg in messages_list:
+                execution_messages.append({"role": msg["role"], "content": msg["content"]})
+            
+            # Inject structural constraints onto the latest user interaction block
+            execution_messages[-1]["content"] += presentation_instructions
+
+            # First Pass: Ask Groq if it needs to execute a search tool function
+            first_response = groq_client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=execution_messages,
+                tools=TOOLS_SCHEMA,
+                tool_choice="auto"
+            )
+            
+            response_message = first_response.choices[0].message
+            tool_calls = response_message.tool_calls
+
+            # If Llama decides it needs real-time search context data:
+            if tool_calls:
+                for tool_call in tool_calls:
+                    if tool_call.function.name == "aggregate_dual_search":
+                        # Safely parse the query generated natively by Llama's context understanding
+                        tool_args = json.loads(tool_call.function.argv or tool_call.function.arguments)
+                        search_query = tool_args.get("query")
+                        
+                        # Run the parallel dual lookup
+                        live_web_context = await aggregate_dual_search(search_query)
+                        
+                        # Append tool invocation trace to the execution array
+                        execution_messages.append(response_message)
+                        execution_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": "aggregate_dual_search",
+                            "content": live_web_context
+                        })
+                        
+                        # Second Pass: Generate the final polished answer using the collected data
+                        final_response = groq_client.chat.completions.create(
+                            model=MODEL_NAME,
+                            messages=execution_messages
+                        )
+                        return final_response.choices[0].message.content
+            
+            # If no tools were required, return the initial message generation directly (Blazing Fast!)
+            return response_message.content
 
     except Exception as e:
-        print(f"Error processing context engine pipeline: {e}")
+        print(f"Error processing native tool calling pipeline: {e}")
         return f"⚠️ Phoenix AI Engine Error: Unable to complete request. ({e})"
 
 async def generate_image_url(prompt: str) -> str:
