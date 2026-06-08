@@ -141,7 +141,7 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
         if image_bytes:
             # 3. RATE-LIMITING & QUEUE: Protect vision execution block under semaphore pool
             async with MEDIA_SEMAPHORE:
-                vision_model = "llama-3.2-11b-vision-instant"
+                vision_model = "llama-3.2-11b-vision-preview"
                 import base64
                 base64_image = base64.b64encode(image_bytes).decode('utf-8')
                 
