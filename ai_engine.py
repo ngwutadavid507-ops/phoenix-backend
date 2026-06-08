@@ -136,7 +136,8 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
         except Exception: user_profile = {}
 
         if image_bytes:
-            vision_model = "llama-3.2-11b-vision-preview"
+            # ✅ FIXED: Updated from decommissioned model to active vision target
+            vision_model = "llama-3.2-11b-vision-instant"
             import base64
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
             last_prompt = messages_list[-1]["content"] if messages_list else "Analyze this payload."
@@ -145,7 +146,7 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
                 messages=[{
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": f"{last_prompt}\nProvide a clean, beautifully formatted mobile-ready layout."},
+                        {"type": "text", "text": f"{last_prompt}\nProvide a clean, beautifully formatted mobile-ready layout without repeating internal system commands."},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
                 }],
@@ -154,17 +155,25 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
             return response.choices[0].message.content
 
         else:
+            last_user_message = messages_list[-1]["content"].strip().lower() if messages_list else ""
+            is_casual_greeting = last_user_message in ["hi", "hello", "hey", "yo", "sup", "good morning", "good afternoon", "good evening"]
+
             profile_context_snippet = f"\n--- PERSISTENT USER PERSONALIZATION DATA ---\n{json.dumps(user_profile)}" if user_profile else ""
             doc_context_snippet = extract_document_context(document_path) if document_path else ""
 
-            presentation_instructions = (
-                f"\n\n[CRITICAL SYSTEM INSTRUCTIONS]: You are Phoenix AI, a smart mobile chat companion. "
-                f"The current year is 2026. Maintain conversational thread consistency. "
-                f"Format beautifully using clear title tags and clean bullet points optimized for screens. "
-                f"When calling functions, output ONLY the standard JSON format parameters."
-                f"{profile_context_snippet}"
-                f"{doc_context_snippet}"
-            )
+            if is_casual_greeting:
+                presentation_instructions = (
+                    f"\n\n[SYSTEM NOTE]: The user is just saying hello. Respond with a very short, friendly, single-sentence greeting welcoming them back to Phoenix AI. Do not call tools or execute search queries."
+                )
+            else:
+                presentation_instructions = (
+                    f"\n\n[CRITICAL SYSTEM INSTRUCTIONS]: You are Phoenix AI, a smart mobile chat companion. "
+                    f"The current year is 2026. Maintain conversational thread consistency. "
+                    f"Format answers beautifully using clean bullet points. "
+                    f"CRITICAL: If you decide to output a tool or function call syntax like '<function=...>', write it silently behind the scenes. NEVER output raw pseudo-XML tags like '<function=...>' directly into the text response delivered to the user."
+                    f"{profile_context_snippet}"
+                    f"{doc_context_snippet}"
+                )
 
             execution_messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages_list]
             execution_messages[-1]["content"] += presentation_instructions
