@@ -20,6 +20,9 @@ SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 MODEL_NAME = "llama-3.3-70b-versatile"
 
+# 3. RATE-LIMITING & QUEUE CONCURRENCY: Global semaphore limits concurrent media/heavy operations to 3 max
+MEDIA_SEMAPHORE = asyncio.Semaphore(3)
+
 # Fully asynchronous Tavily lookup engine
 async def fetch_tavily_results_async(query: str) -> str:
     if not TAVILY_API_KEY: return ""
@@ -136,40 +139,48 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
         except Exception: user_profile = {}
 
         if image_bytes:
-            vision_model = "llama-3.2-11b-vision-instant"
-            import base64
-            base64_image = base64.b64encode(image_bytes).decode('utf-8')
-            
-            # Extract plain text safely for vision prompts to prevent array conversion bugs
-            last_prompt = "Analyze this image payload."
-            if messages_list and isinstance(messages_list[-1].get("content"), str):
-                last_prompt = messages_list[-1]["content"]
+            # 3. RATE-LIMITING & QUEUE: Protect vision execution block under semaphore pool
+            async with MEDIA_SEMAPHORE:
+                vision_model = "llama-3.2-11b-vision-instant"
+                import base64
+                base64_image = base64.b64encode(image_bytes).decode('utf-8')
+                
+                last_prompt = "Analyze this image payload."
+                if messages_list and isinstance(messages_list[-1].get("content"), str):
+                    last_prompt = messages_list[-1]["content"]
 
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: groq_client.chat.completions.create(
-                    model=vision_model,
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": f"{last_prompt}\nProvide a clean, direct layout response."},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                        ]
-                    }],
-                    max_tokens=1024
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: groq_client.chat.completions.create(
+                        model=vision_model,
+                        messages=[{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": f"{last_prompt}\nProvide a clean, direct layout response."},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                            ]
+                        }],
+                        max_tokens=1024
+                    )
                 )
-            )
-            return response.choices[0].message.content
+                return response.choices[0].message.content
 
         else:
             # Safe extraction logic for text messaging streams
-            execution_messages = []
+            raw_messages = []
             for msg in messages_list:
                 if isinstance(msg.get("content"), str):
-                    execution_messages.append({"role": msg["role"], "content": msg["content"]})
+                    raw_messages.append({"role": msg["role"], "content": msg["content"]})
                 else:
-                    execution_messages.append({"role": msg["role"], "content": str(msg["content"])})
+                    raw_messages.append({"role": msg["role"], "content": str(msg["content"])})
+
+            # 2. STATE-AWARE CONTEXT WINDOW: Enforce sliding context threshold (keep latest 12 turns max to protect token window)
+            if len(raw_messages) > 12:
+                # Retain system history foundations if any exist at index 0, otherwise clip standard sliding array context window
+                execution_messages = [raw_messages[0]] + raw_messages[-11:] if raw_messages[0]["role"] == "system" else raw_messages[-12:]
+            else:
+                execution_messages = raw_messages
 
             last_user_message = execution_messages[-1]["content"].strip().lower() if execution_messages else ""
             is_casual_greeting = last_user_message in ["hi", "hello", "hey", "yo", "sup", "good morning", "good afternoon", "good evening"]
@@ -282,23 +293,29 @@ async def generate_image_url(prompt: str) -> str:
     return f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
 
 async def transcribe_voice_bytes(audio_bytes: bytes, filename: str) -> str:
-    try:
-        # Run local file writing in the executor thread pool to stop server freezes
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: open(filename, "wb").write(audio_bytes))
-        
-        def run_whisper():
-            with open(filename, "rb") as audio_file:
-                return groq_client.audio.transcriptions.create(
-                    file=(filename, audio_file.read()),
-                    model="whisper-large-v3",
-                    response_format="text"
-                )
-        
-        transcription = await loop.run_in_executor(None, run_whisper)
-        if os.path.exists(filename): 
-            await loop.run_in_executor(None, os.remove, filename)
-        return transcription
-    except Exception as e:
-        print(f"Transcription execution pipeline error: {e}")
-        return "[Audio asset unreadable]"
+    # 1. ROBUST FILE CLEANUP LIFECYCLE & 3. QUEUE CONCURRENCY ENFORCEMENT
+    async with MEDIA_SEMAPHORE:
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, lambda: open(filename, "wb").write(audio_bytes))
+            
+            def run_whisper():
+                with open(filename, "rb") as audio_file:
+                    return groq_client.audio.transcriptions.create(
+                        file=(filename, audio_file.read()),
+                        model="whisper-large-v3",
+                        response_format="text"
+                    )
+            
+            transcription = await loop.run_in_executor(None, run_whisper)
+            return transcription
+        except Exception as e:
+            print(f"Transcription execution pipeline error: {e}")
+            return "[Audio asset unreadable]"
+        finally:
+            # 1. CLEANUP EXPLICIT LIFECYCLE ROUTINE: Guarantees raw disk space is freed up regardless of success or exception crashes
+            if os.path.exists(filename):
+                try:
+                    await loop.run_in_executor(None, os.remove, filename)
+                except:
+                    pass
