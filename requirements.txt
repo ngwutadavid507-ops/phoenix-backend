@@ -6,3 +6,4 @@ pydantic
 tavily-python
 google-search-results
 pypdf>=4.0.0
+supabase>=2.4.0

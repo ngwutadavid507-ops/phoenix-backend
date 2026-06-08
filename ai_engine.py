@@ -3,6 +3,7 @@ import os
 import json
 import re
 import asyncio
+import urllib.parse
 import httpx
 from groq import Groq
 
@@ -19,7 +20,7 @@ SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 MODEL_NAME = "llama-3.3-70b-versatile"
 
-# ✅ UPGRADED: Fully asynchronous Tavily lookup engine
+# Fully asynchronous Tavily lookup engine
 async def fetch_tavily_results_async(query: str) -> str:
     if not TAVILY_API_KEY: return ""
     url = "https://api.tavily.com/search"
@@ -37,10 +38,11 @@ async def fetch_tavily_results_async(query: str) -> str:
         pass
     return ""
 
-# ✅ UPGRADED: Fully asynchronous SerpApi Google lookup engine
+# Fully asynchronous SerpApi Google lookup engine
 async def fetch_serpapi_results_async(query: str) -> str:
     if not SERPAPI_API_KEY: return ""
-    url = f"https://serpapi.com/search.json?q={httpx.穩quote(query)}&api_key={SERPAPI_API_KEY}&num=3"
+    encoded_query = urllib.parse.quote(query)
+    url = f"https://serpapi.com/search.json?q={encoded_query}&api_key={SERPAPI_API_KEY}&num=3"
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, timeout=6.0)
@@ -58,7 +60,7 @@ async def fetch_serpapi_results_async(query: str) -> str:
         pass
     return ""
 
-# ✅ UPGRADED: Aggregates both pipelines running completely in parallel
+# Aggregates both pipelines running completely in parallel
 async def aggregate_dual_search(query: str) -> str:
     tavily_task = fetch_tavily_results_async(query)
     serpapi_task = fetch_serpapi_results_async(query)
