@@ -136,26 +136,42 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
         except Exception: user_profile = {}
 
         if image_bytes:
-            # ✅ FIXED: Updated from decommissioned model to active vision target
             vision_model = "llama-3.2-11b-vision-instant"
             import base64
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
-            last_prompt = messages_list[-1]["content"] if messages_list else "Analyze this payload."
-            response = groq_client.chat.completions.create(
-                model=vision_model,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"{last_prompt}\nProvide a clean, beautifully formatted mobile-ready layout without repeating internal system commands."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }],
-                max_tokens=1024
+            
+            # Extract plain text safely for vision prompts to prevent array conversion bugs
+            last_prompt = "Analyze this image payload."
+            if messages_list and isinstance(messages_list[-1].get("content"), str):
+                last_prompt = messages_list[-1]["content"]
+
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: groq_client.chat.completions.create(
+                    model=vision_model,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": f"{last_prompt}\nProvide a clean, direct layout response."},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                        ]
+                    }],
+                    max_tokens=1024
+                )
             )
             return response.choices[0].message.content
 
         else:
-            last_user_message = messages_list[-1]["content"].strip().lower() if messages_list else ""
+            # Safe extraction logic for text messaging streams
+            execution_messages = []
+            for msg in messages_list:
+                if isinstance(msg.get("content"), str):
+                    execution_messages.append({"role": msg["role"], "content": msg["content"]})
+                else:
+                    execution_messages.append({"role": msg["role"], "content": str(msg["content"])})
+
+            last_user_message = execution_messages[-1]["content"].strip().lower() if execution_messages else ""
             is_casual_greeting = last_user_message in ["hi", "hello", "hey", "yo", "sup", "good morning", "good afternoon", "good evening"]
 
             profile_context_snippet = f"\n--- PERSISTENT USER PERSONALIZATION DATA ---\n{json.dumps(user_profile)}" if user_profile else ""
@@ -163,27 +179,30 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
 
             if is_casual_greeting:
                 presentation_instructions = (
-                    f"\n\n[SYSTEM NOTE]: The user is just saying hello. Respond with a very short, friendly, single-sentence greeting welcoming them back to Phoenix AI. Do not call tools or execute search queries."
+                    f"\n\n[SYSTEM NOTE]: The user is just saying hello. Respond with a very short, friendly, single-sentence greeting welcoming them back to Phoenix AI."
                 )
             else:
                 presentation_instructions = (
                     f"\n\n[CRITICAL SYSTEM INSTRUCTIONS]: You are Phoenix AI, a smart mobile chat companion. "
-                    f"The current year is 2026. Maintain conversational thread consistency. "
-                    f"Format answers beautifully using clean bullet points. "
-                    f"CRITICAL: If you decide to output a tool or function call syntax like '<function=...>', write it silently behind the scenes. NEVER output raw pseudo-XML tags like '<function=...>' directly into the text response delivered to the user."
+                    f"The current year is 2026. Maintain conversational consistency. "
+                    f"Format answers beautifully using clean layouts. "
+                    f"NEVER output raw pseudo-XML tags like '<function=...>' directly into user chat views."
                     f"{profile_context_snippet}"
                     f"{doc_context_snippet}"
                 )
 
-            execution_messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages_list]
             execution_messages[-1]["content"] += presentation_instructions
 
-            first_response = groq_client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=execution_messages,
-                tools=TOOLS_SCHEMA,
-                tool_choice="auto",
-                extra_body={"disable_tool_validation": True}
+            loop = asyncio.get_event_loop()
+            first_response = await loop.run_in_executor(
+                None,
+                lambda: groq_client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=execution_messages,
+                    tools=TOOLS_SCHEMA,
+                    tool_choice="auto",
+                    extra_body={"disable_tool_validation": True}
+                )
             )
             
             response_message = first_response.choices[0].message
@@ -242,9 +261,12 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
                             "content": tool_content
                         })
                 
-                final_response = groq_client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=execution_messages
+                final_response = await loop.run_in_executor(
+                    None,
+                    lambda: groq_client.chat.completions.create(
+                        model=MODEL_NAME,
+                        messages=execution_messages
+                    )
                 )
                 return final_response.choices[0].message.content
 
@@ -261,15 +283,21 @@ async def generate_image_url(prompt: str) -> str:
 
 async def transcribe_voice_bytes(audio_bytes: bytes, filename: str) -> str:
     try:
-        with open(filename, "wb") as f:
-            f.write(audio_bytes)
-        with open(filename, "rb") as audio_file:
-            transcription = groq_client.audio.transcriptions.create(
-                file=(filename, audio_file.read()),
-                model="whisper-large-v3",
-                response_format="text"
-            )
-        if os.path.exists(filename): os.remove(filename)
+        # Run local file writing in the executor thread pool to stop server freezes
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: open(filename, "wb").write(audio_bytes))
+        
+        def run_whisper():
+            with open(filename, "rb") as audio_file:
+                return groq_client.audio.transcriptions.create(
+                    file=(filename, audio_file.read()),
+                    model="whisper-large-v3",
+                    response_format="text"
+                )
+        
+        transcription = await loop.run_in_executor(None, run_whisper)
+        if os.path.exists(filename): 
+            await loop.run_in_executor(None, os.remove, filename)
         return transcription
     except Exception as e:
         print(f"Transcription execution pipeline error: {e}")
