@@ -20,7 +20,7 @@ SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 MODEL_NAME = "llama-3.3-70b-versatile"
-VISION_MODEL_NAME = "llama-3.2-11b-vision-preview"
+VISION_MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 # Global semaphore limits concurrent media operations to prevent 429 errors
 MEDIA_SEMAPHORE = asyncio.Semaphore(3)
