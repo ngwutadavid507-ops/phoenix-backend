@@ -292,21 +292,33 @@ async def transcribe_voice_bytes(audio_bytes: bytes, filename: str) -> str:
     async with MEDIA_SEMAPHORE:
         try:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: open(filename, "wb").write(audio_bytes))
+            
+            # Ensure file string has a clean explicit fallback naming mapping
+            clean_filename = "voice_recording.ogg" if not filename else filename
+            if not clean_filename.endswith(('.ogg', '.mp3', '.wav', '.m4a')):
+                clean_filename += ".ogg"
+                
+            await loop.run_in_executor(None, lambda: open(clean_filename, "wb").write(audio_bytes))
             
             def run_whisper():
-                with open(filename, "rb") as audio_file:
+                with open(clean_filename, "rb") as audio_file:
                     return groq_client.audio.transcriptions.create(
-                        file=(filename, audio_file.read()),
+                        file=(clean_filename, audio_file.read(), "audio/ogg"),
                         model="whisper-large-v3",
                         response_format="text"
                     )
             
             transcription = await loop.run_in_executor(None, run_whisper)
-            return transcription
+            return transcription if transcription else "[Empty Audio]"
         except Exception as e:
             print(f"Transcription execution pipeline error: {e}")
-            return "[Audio asset unreadable]"
+            return f"[Audio Parsing Error: {e}]"
+        finally:
+            try:
+                if os.path.exists(clean_filename):
+                    os.remove(clean_filename)
+            except:
+                pass
         finally:
             if os.path.exists(filename):
                 try:
