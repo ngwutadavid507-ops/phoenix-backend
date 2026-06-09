@@ -5,6 +5,7 @@ import re
 import asyncio
 import urllib.parse
 import httpx
+import base64
 from groq import Groq
 
 # Pull feature modules dynamically from local pathways
@@ -19,8 +20,9 @@ SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 MODEL_NAME = "llama-3.3-70b-versatile"
+VISION_MODEL_NAME = "llama-3.2-11b-vision-preview"
 
-# 3. RATE-LIMITING & QUEUE CONCURRENCY: Global semaphore limits concurrent media/heavy operations to 3 max
+# Global semaphore limits concurrent media operations to prevent 429 errors
 MEDIA_SEMAPHORE = asyncio.Semaphore(3)
 
 # Fully asynchronous Tavily lookup engine
@@ -138,11 +140,8 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
             if not isinstance(user_profile, dict): user_profile = {}
         except Exception: user_profile = {}
 
-        if image_bytes:
-            # 3. RATE-LIMITING & QUEUE: Protect vision execution block under semaphore pool
+        if image_bytes and len(image_bytes) > 0:
             async with MEDIA_SEMAPHORE:
-                vision_model = "llama-3.2-11b-vision-preview"
-                import base64
                 base64_image = base64.b64encode(image_bytes).decode('utf-8')
                 
                 last_prompt = "Analyze this image payload."
@@ -153,7 +152,7 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
                 response = await loop.run_in_executor(
                     None,
                     lambda: groq_client.chat.completions.create(
-                        model=vision_model,
+                        model=VISION_MODEL_NAME,
                         messages=[{
                             "role": "user",
                             "content": [
@@ -167,7 +166,6 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
                 return response.choices[0].message.content
 
         else:
-            # Safe extraction logic for text messaging streams
             raw_messages = []
             for msg in messages_list:
                 if isinstance(msg.get("content"), str):
@@ -175,9 +173,7 @@ async def process_text_or_vision(user_id: str, messages_list: list, image_bytes:
                 else:
                     raw_messages.append({"role": msg["role"], "content": str(msg["content"])})
 
-            # 2. STATE-AWARE CONTEXT WINDOW: Enforce sliding context threshold (keep latest 12 turns max to protect token window)
             if len(raw_messages) > 12:
-                # Retain system history foundations if any exist at index 0, otherwise clip standard sliding array context window
                 execution_messages = [raw_messages[0]] + raw_messages[-11:] if raw_messages[0]["role"] == "system" else raw_messages[-12:]
             else:
                 execution_messages = raw_messages
@@ -293,7 +289,6 @@ async def generate_image_url(prompt: str) -> str:
     return f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
 
 async def transcribe_voice_bytes(audio_bytes: bytes, filename: str) -> str:
-    # 1. ROBUST FILE CLEANUP LIFECYCLE & 3. QUEUE CONCURRENCY ENFORCEMENT
     async with MEDIA_SEMAPHORE:
         try:
             loop = asyncio.get_event_loop()
@@ -313,7 +308,6 @@ async def transcribe_voice_bytes(audio_bytes: bytes, filename: str) -> str:
             print(f"Transcription execution pipeline error: {e}")
             return "[Audio asset unreadable]"
         finally:
-            # 1. CLEANUP EXPLICIT LIFECYCLE ROUTINE: Guarantees raw disk space is freed up regardless of success or exception crashes
             if os.path.exists(filename):
                 try:
                     await loop.run_in_executor(None, os.remove, filename)
