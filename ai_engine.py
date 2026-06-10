@@ -1,327 +1,203 @@
-# ai_engine.py
 import os
-import json
-import re
+import sys
 import asyncio
-import urllib.parse
 import httpx
-import base64
+import logging
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
 from groq import Groq
+from telegram import Bot
+from tavily import TavilyClient
 
-# Pull feature modules dynamically from local pathways
-from modules.rag_processor import extract_document_context
-from modules.personalization import load_user_profile, save_user_profile
-from modules.crypto_ticker import fetch_crypto_asset_metrics
+# Set up logging configuration
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-# Infrastructure Key Configuration
+# Load and validate core environment tokens
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 
+if not GROQ_API_KEY:
+    logger.error("CRITICAL: GROQ_API_KEY environmental variable is missing!")
+
+# Initialize third-party client drivers securely
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-MODEL_NAME = "llama-3.3-70b-versatile"
-VISION_MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"
+tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
+tg_bot = Bot(token=TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 
-# Global semaphore limits concurrent media operations to prevent 429 errors
-MEDIA_SEMAPHORE = asyncio.Semaphore(3)
+class MobileAppResponse(BaseModel):
+    ui_intent: str = Field(description="The intent of the message (e.g., 'chat', 'search_result', 'image_generation', 'error')")
+    display_title: Optional[str] = Field(None, description="A clean, bold title for the UI card header")
+    main_text: str = Field(description="The core conversational answer, supporting clean Markdown formatting")
+    suggested_quick_replies: List[str] = Field(default=[], description="Contextual follow-up buttons for the app UI")
+    citations: List[str] = Field(default=[], description="Clean URLs discovered during live web search analysis")
 
-# Fully asynchronous Tavily lookup engine
-async def fetch_tavily_results_async(query: str) -> str:
-    if not TAVILY_API_KEY: return ""
-    url = "https://api.tavily.com/search"
-    payload = {"api_key": TAVILY_API_KEY, "query": query, "search_depth": "advanced", "max_results": 3}
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, timeout=6.0)
-            if response.status_code == 200:
-                results = response.json().get("results", [])
-                context_str = "--- TAVILY LIVE DATA ---\n"
-                for res in results:
-                    context_str += f"Context: {res.get('content')}\n\n"
-                return context_str
-    except:
-        pass
-    return ""
+def get_structured_system_prompt() -> str:
+    return """You are the core intelligence engine of Phoenix AI.
+When handling native mobile app traffic requests, you MUST respond strictly with a valid JSON object matching this schema:
+{
+    "ui_intent": "chat" | "search_result" | "image_generation",
+    "display_title": "Optional Title Header",
+    "main_text": "Your markdown-supported response string here",
+    "suggested_quick_replies": ["Follow up question 1", "Follow up question 2"],
+    "citations": ["https://sourceurl.com"]
+}
+Do not include markdown code block formatting backticks (```json) in your final response payload string."""
 
-# Fully asynchronous SerpApi Google lookup engine
-async def fetch_serpapi_results_async(query: str) -> str:
-    if not SERPAPI_API_KEY: return ""
-    encoded_query = urllib.parse.quote(query)
-    url = f"https://serpapi.com/search.json?q={encoded_query}&api_key={SERPAPI_API_KEY}&num=3"
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=6.0)
-            if response.status_code == 200:
-                data = response.json()
-                organic_results = data.get("organic_results", [])
-                context_str = "--- SERPAPI GOOGLE SEARCH DATA ---\n"
-                if "answer_box" in data:
-                    box = data["answer_box"]
-                    context_str += f"Direct Answer: {box.get('answer') or box.get('snippet')}\n\n"
-                for res in organic_results:
-                    context_str += f"Snippet: {res.get('snippet')}\n\n"
-                return context_str
-    except:
-        pass
-    return ""
-
-# Aggregates both pipelines running completely in parallel
-async def aggregate_dual_search(query: str) -> str:
-    tavily_task = fetch_tavily_results_async(query)
-    serpapi_task = fetch_serpapi_results_async(query)
-    tavily_res, serpapi_res = await asyncio.gather(tavily_task, serpapi_task)
-    return f"{tavily_res}\n{serpapi_res}"
-
-TOOLS_SCHEMA = [
-    {
-        "type": "function",
-        "function": {
-            "name": "aggregate_dual_search",
-            "description": "Call this tool for live events, general news updates, real-time facts, fiat conversion rates, or data requiring up-to-date info.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The optimized search query resolving any shorthand references."}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "update_user_preference",
-            "description": "Call this tool to save specific metadata attributes about the user permanently.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "key": {"type": "string", "description": "The preference key identifier."},
-                    "value": {"type": "string", "description": "The information string value to save."}
-                },
-                "required": ["key", "value"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "lookup_crypto_metrics",
-            "description": "Call this tool when the user requests current pricing or live market metrics for crypto assets.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "token_id": {"type": "string", "description": "The token symbol string (e.g., 'BTC', 'sol')."}
-                },
-                "required": ["token_id"]
-            }
-        }
+async def send_whatsapp_api(payload: dict) -> dict:
+    if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
+        logger.warning("WhatsApp credentials missing. Skipping API dispatch.")
+        return {}
+    url = f"[https://graph.facebook.com/v17.0/](https://graph.facebook.com/v17.0/){WHATSAPP_PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
     }
-]
-
-def parse_fallback_text_tool_calls(text: str):
-    found_calls = []
-    pattern = r"<function=(\w+)\s*(\{.*?\})\s*>"
-    matches = re.findall(pattern, text, re.DOTALL)
-    for match in matches:
-        func_name = match[0]
+    async with httpx.AsyncClient() as client:
         try:
-            func_args = json.loads(match[1])
-            found_calls.append({"name": func_name, "args": func_args})
-        except: continue
-    return found_calls
-
-async def process_text_or_vision(user_id: str, messages_list: list, image_bytes: bytes = None, document_path: str = None):
-    try:
-        if not GROQ_API_KEY:
-            return "❌ Engine Configuration Error: GROQ_API_KEY is missing."
-
-        try:
-            user_profile = load_user_profile(user_id)
-            if not isinstance(user_profile, dict): user_profile = {}
-        except Exception: user_profile = {}
-
-        if image_bytes and len(image_bytes) > 0:
-            async with MEDIA_SEMAPHORE:
-                base64_image = base64.b64encode(image_bytes).decode('utf-8')
-                
-                last_prompt = "Analyze this image payload."
-                if messages_list and isinstance(messages_list[-1].get("content"), str):
-                    last_prompt = messages_list[-1]["content"]
-
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: groq_client.chat.completions.create(
-                        model=VISION_MODEL_NAME,
-                        messages=[{
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": f"{last_prompt}\nProvide a clean, direct layout response."},
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                            ]
-                        }],
-                        max_tokens=1024
-                    )
-                )
-                return response.choices[0].message.content
-
-        else:
-            raw_messages = []
-            for msg in messages_list:
-                if isinstance(msg.get("content"), str):
-                    raw_messages.append({"role": msg["role"], "content": msg["content"]})
-                else:
-                    raw_messages.append({"role": msg["role"], "content": str(msg["content"])})
-
-            if len(raw_messages) > 12:
-                execution_messages = [raw_messages[0]] + raw_messages[-11:] if raw_messages[0]["role"] == "system" else raw_messages[-12:]
-            else:
-                execution_messages = raw_messages
-
-            last_user_message = execution_messages[-1]["content"].strip().lower() if execution_messages else ""
-            is_casual_greeting = last_user_message in ["hi", "hello", "hey", "yo", "sup", "good morning", "good afternoon", "good evening"]
-
-            profile_context_snippet = f"\n--- PERSISTENT USER PERSONALIZATION DATA ---\n{json.dumps(user_profile)}" if user_profile else ""
-            doc_context_snippet = extract_document_context(document_path) if document_path else ""
-
-            if is_casual_greeting:
-                presentation_instructions = (
-                    f"\n\n[SYSTEM NOTE]: The user is just saying hello. Respond with a very short, friendly, single-sentence greeting welcoming them back to Phoenix AI."
-                )
-            else:
-                presentation_instructions = (
-                    f"\n\n[CRITICAL SYSTEM INSTRUCTIONS]: You are Phoenix AI, a smart mobile chat companion. "
-                    f"The current year is 2026. Maintain conversational consistency. "
-                    f"Format answers beautifully using clean layouts. "
-                    f"NEVER output raw pseudo-XML tags like '<function=...>' directly into user chat views."
-                    f"{profile_context_snippet}"
-                    f"{doc_context_snippet}"
-                )
-
-            execution_messages[-1]["content"] += presentation_instructions
-
-            loop = asyncio.get_event_loop()
-            first_response = await loop.run_in_executor(
-                None,
-                lambda: groq_client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=execution_messages,
-                    tools=TOOLS_SCHEMA,
-                    tool_choice="auto",
-                    extra_body={"disable_tool_validation": True}
-                )
-            )
-            
-            response_message = first_response.choices[0].message
-            tool_calls = response_message.tool_calls
-            raw_text = response_message.content or ""
-
-            parsed_fallback_calls = parse_fallback_text_tool_calls(raw_text) if not tool_calls else []
-
-            if tool_calls or parsed_fallback_calls:
-                execution_messages.append(response_message)
-                
-                if tool_calls:
-                    for tool_call in tool_calls:
-                        function_name = tool_call.function.name
-                        try: tool_args = json.loads(tool_call.function.arguments)
-                        except: continue
-                        
-                        tool_content = ""
-                        if function_name == "aggregate_dual_search":
-                            tool_content = await aggregate_dual_search(tool_args.get("query", ""))
-                        elif function_name == "update_user_preference":
-                            key, val = tool_args.get("key"), tool_args.get("value")
-                            user_profile[key] = val
-                            save_user_profile(user_id, user_profile)
-                            tool_content = f"[Preference '{key}' saved.]"
-                        elif function_name == "lookup_crypto_metrics":
-                            tool_content = await fetch_crypto_asset_metrics(tool_args.get("token_id", ""))
-
-                        execution_messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": function_name,
-                            "content": tool_content
-                        })
-
-                else:
-                    for idx, fallback_call in enumerate(parsed_fallback_calls):
-                        function_name = fallback_call["name"]
-                        tool_args = fallback_call["args"]
-                        
-                        tool_content = ""
-                        if function_name == "aggregate_dual_search":
-                            tool_content = await aggregate_dual_search(tool_args.get("query", ""))
-                        elif function_name == "update_user_preference":
-                            key, val = tool_args.get("key"), tool_args.get("value")
-                            user_profile[key] = val
-                            save_user_profile(user_id, user_profile)
-                            tool_content = f"[Preference '{key}' saved.]"
-                        elif function_name == "lookup_crypto_metrics":
-                            tool_content = await fetch_crypto_asset_metrics(tool_args.get("token_id", ""))
-
-                        execution_messages.append({
-                            "role": "tool",
-                            "tool_call_id": f"fallback_id_{idx}",
-                            "name": function_name,
-                            "content": tool_content
-                        })
-                
-                final_response = await loop.run_in_executor(
-                    None,
-                    lambda: groq_client.chat.completions.create(
-                        model=MODEL_NAME,
-                        messages=execution_messages
-                    )
-                )
-                return final_response.choices[0].message.content
-
-            return raw_text
-
-    except Exception as e:
-        print(f"Error handling engine runtime workflow execution loop: {e}")
-        return f"⚠️ Phoenix AI Engine Error: Unable to resolve process context. ({e})"
-
-async def generate_image_url(prompt: str) -> str:
-    import urllib.parse
-    encoded_prompt = urllib.parse.quote(prompt)
-    return f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
-
-async def transcribe_voice_bytes(audio_bytes: bytes, filename: str) -> str:
-    async with MEDIA_SEMAPHORE:
-        try:
-            loop = asyncio.get_event_loop()
-            
-            # Ensure file string has a clean explicit fallback naming mapping
-            clean_filename = "voice_recording.ogg" if not filename else filename
-            if not clean_filename.endswith(('.ogg', '.mp3', '.wav', '.m4a')):
-                clean_filename += ".ogg"
-                
-            await loop.run_in_executor(None, lambda: open(clean_filename, "wb").write(audio_bytes))
-            
-            def run_whisper():
-                with open(clean_filename, "rb") as audio_file:
-                    return groq_client.audio.transcriptions.create(
-                        file=(clean_filename, audio_file.read(), "audio/ogg"),
-                        model="whisper-large-v3",
-                        response_format="text"
-                    )
-            
-            transcription = await loop.run_in_executor(None, run_whisper)
-            return transcription if transcription else "[Empty Audio]"
+            response = await client.post(url, headers=headers, json=payload, timeout=10.0)
+            return response.json()
         except Exception as e:
-            print(f"Transcription execution pipeline error: {e}")
-            return f"[Audio Parsing Error: {e}]"
-        finally:
-            try:
-                if os.path.exists(clean_filename):
-                    os.remove(clean_filename)
-            except:
-                pass
-        finally:
+            logger.error(f"Failed to post payload to WhatsApp cloud endpoints: {e}")
+            return {}
+
+async def execute_web_search(query: str) -> str:
+    if not tavily_client:
+        return "[Search engine inactive: Missing API Key]"
+    try:
+        loop = asyncio.get_running_loop()
+        # Offload synchronous Tavily SDK request execution to background worker thread context
+        response = await loop.run_in_executor(
+            None, 
+            lambda: tavily_client.search(query=query, search_depth="advanced", max_results=4)
+        )
+        results = response.get("results", [])
+        if not results:
+            return "No relevant real-time search context was uncovered for this query."
+        
+        compiled_context = []
+        for item in results:
+            compiled_context.append(f"Source: {item.get('url')}\nContent: {item.get('content')}\n")
+        return "\n---\n".join(compiled_context)
+    except Exception as e:
+        logger.error(f"Search engine task execution failure: {e}")
+        return f"[Search error encountered: {e}]"
+
+async def run_llama_inference(system_prompt: str, user_prompt: str, model_name: str = "llama-3.3-70b-versatile") -> str:
+    if not groq_client:
+        return "AI Core engine offline. Complete configuration profile to converse."
+    try:
+        loop = asyncio.get_running_loop()
+        completion = await loop.run_in_executor(
+            None,
+            lambda: groq_client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=2048
+            )
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Groq reasoning model failure: {e}")
+        return f"An operational error occurred while generating text answers: {e}"
+
+async def process_telegram_with_status(chat_id: int, user_query: str):
+    if not tg_bot:
+        return
+    try:
+        await tg_bot.send_chat_action(chat_id=chat_id, action="typing")
+        status_msg = await tg_bot.send_message(
+            chat_id=chat_id, 
+            text="🧠 *Phoenix AI is thinking...*", 
+            parse_mode="Markdown"
+        )
+        
+        await tg_bot.edit_message_text(
+            chat_id=chat_id, message_id=status_msg.message_id,
+            text="🔍 *Searching the web for live context...*", parse_mode="Markdown"
+        )
+        
+        # Concurrent evaluation of context search and reasoning initialization
+        search_context = await execute_web_search(user_query)
+        
+        await tg_bot.edit_message_text(
+            chat_id=chat_id, message_id=status_msg.message_id,
+            text="⚙️ *Analyzing sources and processing reasoning...*", parse_mode="Markdown"
+        )
+        
+        system_rules = "You are Phoenix AI, an elite assistant. Combine the following web search context to fulfill requests cleanly:\n" + search_context
+        final_answer = await run_llama_inference(system_rules, user_query)
+        
+        await tg_bot.edit_message_text(
+            chat_id=chat_id, message_id=status_msg.message_id,
+            text=final_answer, parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Telegram status tracking workflow broken: {e}")
+
+async def process_whatsapp_with_status(user_phone: str, user_query: str):
+    typing_payload = {
+        "messaging_product": "whatsapp", "recipient_type": "individual",
+        "to": user_phone, "type": "typing_indicator", "typing_indicator": {"type": "text"}
+    }
+    await send_whatsapp_api(typing_payload)
+    
+    ack_payload = {
+        "messaging_product": "whatsapp", "to": user_phone, "type": "text",
+        "text": {"body": "🔍 Phoenix AI is researching and analyzing your request now. Hold on a moment..."}
+    }
+    await send_whatsapp_api(ack_payload)
+    
+    try:
+        search_context = await execute_web_search(user_query)
+        system_rules = "You are Phoenix AI. Synthesize web findings to build answers with references:\n" + search_context
+        final_answer = await run_llama_inference(system_rules, user_query)
+        
+        final_payload = {
+            "messaging_product": "whatsapp", "to": user_phone, "type": "text",
+            "text": {"body": final_answer}
+        }
+        await send_whatsapp_api(final_payload)
+    except Exception as e:
+        logger.error(f"WhatsApp execution thread exception: {e}")
+
+async def transcribe_voice_bytes(filename: str, clean_filename: str) -> str:
+    if not groq_client:
+        return "[Transcription Engine Offline]"
+    try:
+        loop = asyncio.get_running_loop()
+        
+        def run_whisper():
+            # Insulated binary file descriptor targeting Whisper engine directly
+            with open(clean_filename, "rb") as audio_file:
+                return groq_client.audio.transcriptions.create(
+                    file=(os.path.basename(clean_filename), audio_file.read(), "audio/ogg"),
+                    model="whisper-large-v3",
+                    language="en"
+                ).text
+
+        transcription = await loop.run_in_executor(None, run_whisper)
+        return transcription if transcription else "[Empty Audio]"
+    except Exception as e:
+        logger.error(f"Transcription execution pipeline error: {e}")
+        return f"[Audio Parsing Error: {e}]"
+    finally:
+        # Combined single finally block safely executing cleanup tasks sequentially
+        try:
+            if os.path.exists(clean_filename):
+                os.remove(clean_filename)
+        except Exception as cleanup_err:
+            logger.error(f"Failed deleting temporary file clean_filename: {cleanup_err}")
+            
+        try:
             if os.path.exists(filename):
-                try:
-                    await loop.run_in_executor(None, os.remove, filename)
-                except:
-                    pass
+                os.remove(filename)
+        except Exception as cleanup_err:
+            logger.error(f"Failed deleting temporary raw filename payload: {cleanup_err}")
