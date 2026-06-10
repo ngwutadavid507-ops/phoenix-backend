@@ -20,9 +20,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 
-if not GROQ_API_KEY:
-    logger.error("CRITICAL: GROQ_API_KEY environmental variable is missing!")
-
 # Initialize third-party client drivers securely
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
@@ -69,7 +66,6 @@ async def execute_web_search(query: str) -> str:
         return "[Search engine inactive: Missing API Key]"
     try:
         loop = asyncio.get_running_loop()
-        # Offload synchronous Tavily SDK request execution to background worker thread context
         response = await loop.run_in_executor(
             None, 
             lambda: tavily_client.search(query=query, search_depth="advanced", max_results=4)
@@ -108,6 +104,30 @@ async def run_llama_inference(system_prompt: str, user_prompt: str, model_name: 
         logger.error(f"Groq reasoning model failure: {e}")
         return f"An operational error occurred while generating text answers: {e}"
 
+# --- Added back to resolve main.py import error ---
+async def process_text_or_vision(user_id: str, prompt: str, image_bytes: Optional[bytes] = None) -> str:
+    """Processes incoming user text query or multimodal vision payload."""
+    try:
+        if image_bytes:
+            # Placeholder/Fallback for multimodal processing via Llama 3.2 Vision if bytes exist
+            system_msg = "You are Phoenix AI. Analyze the uploaded image and text layout thoughtfully."
+            return await run_llama_inference(system_msg, prompt, model_name="llama-3.2-11b-vision-preview")
+        
+        # Default behavior: Search + Text generation
+        context = await execute_web_search(prompt)
+        system_rules = f"You are Phoenix AI. Core app framework rules apply.\n\nContext:\n{context}"
+        return await run_llama_inference(system_rules, prompt)
+    except Exception as e:
+        logger.error(f"Error executing process_text_or_vision: {e}")
+        return f"Error analyzing message pipeline: {e}"
+
+# --- Added back to resolve main.py import error ---
+async def generate_image_url(prompt: str) -> str:
+    """Generates an image URL using the pipeline configuration."""
+    # Placeholder return for app engine routing mapping
+    logger.info(f"Image generation request received for prompt: {prompt}")
+    return "[https://via.placeholder.com/1024.png?text=Phoenix+AI+Image+Generation+Placeholder](https://via.placeholder.com/1024.png?text=Phoenix+AI+Image+Generation+Placeholder)"
+
 async def process_telegram_with_status(chat_id: int, user_query: str):
     if not tg_bot:
         return
@@ -124,7 +144,6 @@ async def process_telegram_with_status(chat_id: int, user_query: str):
             text="🔍 *Searching the web for live context...*", parse_mode="Markdown"
         )
         
-        # Concurrent evaluation of context search and reasoning initialization
         search_context = await execute_web_search(user_query)
         
         await tg_bot.edit_message_text(
@@ -175,7 +194,6 @@ async def transcribe_voice_bytes(filename: str, clean_filename: str) -> str:
         loop = asyncio.get_running_loop()
         
         def run_whisper():
-            # Insulated binary file descriptor targeting Whisper engine directly
             with open(clean_filename, "rb") as audio_file:
                 return groq_client.audio.transcriptions.create(
                     file=(os.path.basename(clean_filename), audio_file.read(), "audio/ogg"),
@@ -189,7 +207,6 @@ async def transcribe_voice_bytes(filename: str, clean_filename: str) -> str:
         logger.error(f"Transcription execution pipeline error: {e}")
         return f"[Audio Parsing Error: {e}]"
     finally:
-        # Combined single finally block safely executing cleanup tasks sequentially
         try:
             if os.path.exists(clean_filename):
                 os.remove(clean_filename)
