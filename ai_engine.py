@@ -92,8 +92,8 @@ async def run_llama_inference(system_prompt: str, user_prompt: str, model_name: 
             lambda: groq_client.chat.completions.create(
                 model=model_name,
                 messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
+                    {"role": "system", "content": str(system_prompt)},
+                    {"role": "user", "content": str(user_prompt)}
                 ],
                 temperature=0.3,
                 max_tokens=2048
